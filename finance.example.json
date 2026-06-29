@@ -1,0 +1,20 @@
+{
+  "name": "Sample Ledger",
+  "hourlyRate": 25,
+  "currency": "AUD",
+  "lineItems": [
+    { "name": "rent", "amount": 1600.0, "cadence": "monthly", "tags": ["essential", "liability"] },
+    { "name": "health_insurance", "amount": 80.0, "cadence": "monthly", "tags": ["essential", "liability"] },
+    { "name": "phone_internet", "amount": 110.0, "cadence": "monthly", "tags": ["essential", "liability"] },
+    { "name": "online_course", "amount": 30.0, "cadence": "monthly", "tags": ["strategic_weapon", "subscription"] },
+    { "name": "ai_assistant_pro", "amount": 33.0, "cadence": "monthly", "tags": ["strategic_weapon", "subscription"] },
+    { "name": "cloud_credits", "amount": 35.0, "cadence": "monthly", "tags": ["strategic_weapon", "subscription"] },
+    { "name": "streaming", "amount": 29.0, "cadence": "monthly", "tags": ["discretionary", "subscription"] },
+    { "name": "groceries", "amount": 110.0, "cadence": "weekly", "tags": ["essential", "variable"] }
+  ],
+  "context": {
+    "marketCondition": "hostile_to_intl_grads",
+    "financialIndependence": true,
+    "currentRole": "Hourly Worker"
+  }
+}

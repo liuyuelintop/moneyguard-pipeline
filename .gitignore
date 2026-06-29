@@ -1,0 +1,16 @@
+node_modules/
+dist/
+*.log
+.DS_Store
+
+# Secrets — never commit real credentials
+.env
+.env.local
+
+# Private ledger — the real finance.json holds confidential balances.
+# Only finance.example.json (sanitized) is tracked. See README "Privacy boundary".
+/finance.json
+
+# Local-only assets: real timecards / anything personal. Keep your real timecard
+# as fixtures/timecard.local.png — only the synthetic fixtures/timecard.png is tracked.
+*.local.*
