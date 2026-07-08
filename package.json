@@ -31,7 +31,8 @@
     "node": ">=22"
   },
   "bin": {
-    "moneyguard": "./dist/cli/main.js"
+    "moneyguard": "./dist/cli/main.js",
+    "moneyguard-extract": "./dist/http/server.js"
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -48,6 +49,7 @@
   "scripts": {
     "build": "tsdown",
     "dev": "tsx src/cli/main.ts",
+    "serve:extract": "tsx src/http/server.ts",
     "moneyguard": "tsx src/cli/main.ts",
     "test": "vitest run",
     "test:watch": "vitest",
