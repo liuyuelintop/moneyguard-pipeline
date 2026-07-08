@@ -3,7 +3,7 @@ import { defineConfig } from "tsdown";
 // Two entry points: the importable library barrel and the CLI binary.
 // `@google/genai` stays external — it is a runtime dependency, not bundled.
 export default defineConfig({
-  entry: ["src/index.ts", "src/cli/main.ts"],
+  entry: ["src/index.ts", "src/cli/main.ts", "src/http/server.ts"],
   format: ["esm"],
   platform: "node",
   target: "node22",

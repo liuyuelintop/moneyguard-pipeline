@@ -6,6 +6,23 @@ export {
   type PipelineOptions,
   type PipelineResult,
 } from "./pipeline.js";
+export {
+  extractMoneyGuardTotals,
+  type ExtractionFailureKind,
+  type TotalsExtraction,
+  type TotalsExtractionOptions,
+  type TotalsExtractionResult,
+} from "./extract.js";
+export {
+  DEFAULT_MAX_IMAGE_BYTES,
+  handleExtractRequest,
+  type ExtractEndpointOptions,
+} from "./http/extract.js";
+export {
+  createExtractServer,
+  startExtractServer,
+  type ExtractServerOptions,
+} from "./http/server.js";
 
 export { loadConfig, type MoneyGuardConfig } from "./config.js";
 
