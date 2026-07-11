@@ -20,9 +20,12 @@ export {
 } from "./http/extract.js";
 export {
   createExtractServer,
+  listenExtractServer,
+  resolveExtractListenOptions,
   startExtractServer,
+  type ExtractListenOptions,
   type ExtractServerOptions,
-} from "./http/server.js";
+} from "./http/server-core.js";
 
 export { loadConfig, type MoneyGuardConfig } from "./config.js";
 
