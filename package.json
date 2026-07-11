@@ -49,6 +49,7 @@
   "scripts": {
     "build": "tsdown",
     "dev": "tsx src/cli/main.ts",
+    "start": "node dist/http/server.js",
     "serve:extract": "tsx src/http/server.ts",
     "moneyguard": "tsx src/cli/main.ts",
     "test": "vitest run",
