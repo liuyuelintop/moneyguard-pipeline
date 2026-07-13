@@ -1,5 +1,6 @@
 import { GoogleGenAI } from "@google/genai";
 import { DEFAULT_VISION_MODEL } from "../config.js";
+import { DEFAULT_IMAGE_MIME_TYPE, type SupportedImageMimeType } from "../image.js";
 import type { VisionProvider } from "./types.js";
 
 // Gemini vision adapter. Returns raw parsed JSON (unknown — caller validates with
@@ -16,10 +17,10 @@ export class GeminiVisionProvider implements VisionProvider {
     imageBuffer: Buffer,
     prompt: string,
     model: string = process.env.MONEY_GUARD_VISION_MODEL ?? DEFAULT_VISION_MODEL,
-    mimeType = "image/jpeg",
+    mimeType: SupportedImageMimeType = DEFAULT_IMAGE_MIME_TYPE,
   ): Promise<unknown> {
     if (process.env.MONEY_GUARD_DEBUG === "true") {
-      console.log("gemini.vision called. Model:", model, "Image buffer length:", imageBuffer.length);
+      console.log("gemini.vision called. MIME:", mimeType);
     }
 
     const response = await this.client.models.generateContent({

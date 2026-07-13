@@ -28,6 +28,16 @@ export {
 } from "./http/server-core.js";
 
 export { loadConfig, type MoneyGuardConfig } from "./config.js";
+export {
+  DEFAULT_IMAGE_MIME_TYPE,
+  SUPPORTED_IMAGE_MIME_TYPES,
+  detectImageMimeType,
+  isSupportedImageMimeType,
+  normalizeDeclaredImageMimeType,
+  resolveUploadedImageMimeType,
+  type SupportedImageMimeType,
+  type UploadedImage,
+} from "./image.js";
 
 export {
   selectProviders,

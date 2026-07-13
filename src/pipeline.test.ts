@@ -196,4 +196,25 @@ describe("pipeline — finance.json schema validation", () => {
     expect(result).toMatchObject({ ok: false, kind: "config" });
     expect(audit.calls).toHaveLength(0);
   });
+
+  it("normalizes unknown marketCondition values without forwarding the raw value", async () => {
+    const privateMarketMarker = "private-market-condition-marker";
+    const { providers, audit } = makeProviders(goodOcr);
+    const config = makeConfig(
+      writeFinance({
+        ...SENTINEL_FINANCE,
+        context: { ...SENTINEL_FINANCE.context, marketCondition: privateMarketMarker },
+      }),
+    );
+
+    const result = await runMoneyGuardPipeline(Buffer.from("img"), {
+      providers,
+      config,
+      onReportUpdate: noop,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(audit.calls).toHaveLength(1);
+    expect(audit.calls[0]!.userPrompt).not.toContain(privateMarketMarker);
+  });
 });

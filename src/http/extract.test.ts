@@ -5,11 +5,13 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { loadConfig, type MoneyGuardConfig } from "../config.js";
 import { handleExtractRequest } from "./extract.js";
 import type { VisionProvider } from "../providers/types.js";
+import type { SupportedImageMimeType } from "../image.js";
 
 const CREDENTIAL = "test-private-token";
 const PNG_BYTES = Buffer.from([
   0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x00,
 ]);
+const JPEG_BYTES = Buffer.from([0xff, 0xd8, 0xff, 0x00]);
 
 const FINANCE = {
   hourlyRate: 30,
@@ -23,11 +25,16 @@ const FINANCE = {
 };
 
 class StubVision implements VisionProvider {
-  public calls = 0;
+  public calls: Array<{ mimeType: SupportedImageMimeType | undefined }> = [];
   constructor(private readonly result: unknown, private readonly failure?: Error) {}
 
-  async vision(): Promise<unknown> {
-    this.calls++;
+  async vision(
+    _imageBuffer: Buffer,
+    _prompt: string,
+    _model: string | undefined,
+    mimeType: SupportedImageMimeType | undefined,
+  ): Promise<unknown> {
+    this.calls.push({ mimeType });
     if (this.failure) throw this.failure;
     return this.result;
   }
@@ -86,7 +93,7 @@ describe("POST /extract", () => {
 
     expect(response.status).toBe(401);
     expect(await parse(response)).toEqual({ error: "Unauthorized." });
-    expect(vision.calls).toBe(0);
+    expect(vision.calls).toHaveLength(0);
   });
 
   it("rejects invalid multipart payloads before calling the provider", async () => {
@@ -101,7 +108,49 @@ describe("POST /extract", () => {
 
     expect(response.status).toBe(415);
     expect(await parse(response)).toEqual({ error: "Unsupported image type." });
-    expect(vision.calls).toBe(0);
+    expect(vision.calls).toHaveLength(0);
+  });
+
+  it("rejects declared MIME types that do not match the image signature", async () => {
+    const vision = new StubVision({ totalHours: 40, period: "2026-W27", confidence: "high" });
+    const form = makeForm(new Blob([PNG_BYTES], { type: "image/jpeg" }));
+
+    const response = await handleExtractRequest(makeRequest(form), {
+      credential: CREDENTIAL,
+      config: makeConfig(),
+      vision,
+    });
+
+    expect(response.status).toBe(415);
+    expect(await parse(response)).toEqual({ error: "Unsupported image type." });
+    expect(vision.calls).toHaveLength(0);
+  });
+
+  it("passes the validated PNG MIME type to the vision provider", async () => {
+    const vision = new StubVision({ totalHours: 40, period: "2026-W27", confidence: "high" });
+
+    const response = await handleExtractRequest(makeRequest(makeForm()), {
+      credential: CREDENTIAL,
+      config: makeConfig(),
+      vision,
+    });
+
+    expect(response.status).toBe(200);
+    expect(vision.calls).toEqual([{ mimeType: "image/png" }]);
+  });
+
+  it("passes the validated JPEG MIME type to the vision provider", async () => {
+    const vision = new StubVision({ totalHours: 40, period: "2026-W27", confidence: "high" });
+    const form = makeForm(new Blob([JPEG_BYTES], { type: "image/jpeg" }));
+
+    const response = await handleExtractRequest(makeRequest(form), {
+      credential: CREDENTIAL,
+      config: makeConfig(),
+      vision,
+    });
+
+    expect(response.status).toBe(200);
+    expect(vision.calls).toEqual([{ mimeType: "image/jpeg" }]);
   });
 
   it("returns a generic provider failure without leaking provider details", async () => {
@@ -118,7 +167,7 @@ describe("POST /extract", () => {
     expect(response.status).toBe(502);
     expect(body).toEqual({ error: "OCR provider failed." });
     expect(JSON.stringify(body)).not.toContain("raw OCR text");
-    expect(consoleError).toHaveBeenCalledWith("[moneyGuard] vision call failed");
+    expect(consoleError).toHaveBeenCalledWith("[moneyGuard] vision_provider_failed");
   });
 
   it("rejects invalid OCR output", async () => {
@@ -167,5 +216,51 @@ describe("POST /extract", () => {
       "warnings",
     ]);
     expect(JSON.stringify(body)).not.toMatch(/workerName|employer|fileName|mimeType|sizeBytes/i);
+  });
+
+  it("normalizes unknown marketCondition values without exposing the raw value", async () => {
+    const privateMarketMarker = "private-market-condition-marker";
+    const vision = new StubVision({ totalHours: 40, period: "2026-W27", confidence: "high" });
+
+    const response = await handleExtractRequest(makeRequest(makeForm()), {
+      credential: CREDENTIAL,
+      config: makeConfig(
+        writeFinance({
+          ...FINANCE,
+          context: { ...FINANCE.context, marketCondition: privateMarketMarker },
+        }),
+      ),
+      vision,
+    });
+
+    const body = await parse(response);
+    expect(response.status).toBe(200);
+    expect(JSON.stringify(body)).not.toContain(privateMarketMarker);
+  });
+
+  it("logs finance config failures without dumping raw Zod objects or config values", async () => {
+    const privateConfigMarker = "private-config-marker";
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    const vision = new StubVision({ totalHours: 40, period: "2026-W27", confidence: "high" });
+
+    const response = await handleExtractRequest(makeRequest(makeForm()), {
+      credential: CREDENTIAL,
+      config: makeConfig(
+        writeFinance({
+          ...FINANCE,
+          hourlyRate: -1,
+          context: { ...FINANCE.context, currentRole: privateConfigMarker },
+        }),
+      ),
+      vision,
+    });
+
+    const logged = consoleError.mock.calls.flat().join(" ");
+    expect(response.status).toBe(500);
+    expect(logged).toContain("[moneyGuard] finance_config_invalid:");
+    expect(logged).toContain("schema_validation_failed");
+    expect(logged).not.toContain(privateConfigMarker);
+    expect(logged).not.toContain("ZodError");
+    expect(logged).not.toContain("stack");
   });
 });

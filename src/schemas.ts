@@ -13,6 +13,14 @@ export const COST_TAGS = [
 export const MARKET_CONDITIONS = ["hostile_to_intl_grads", "neutral", "favorable"] as const;
 
 export type CostTag = (typeof COST_TAGS)[number];
+type MarketCondition = (typeof MARKET_CONDITIONS)[number];
+
+function normalizeMarketCondition(value: unknown): unknown {
+  if (typeof value !== "string") return value;
+  const normalized = value.trim();
+  if ((MARKET_CONDITIONS as readonly string[]).includes(normalized)) return normalized as MarketCondition;
+  return "neutral" satisfies MarketCondition;
+}
 
 export const LineItemSchema = z.object({
   name: z.string().min(1),
@@ -22,7 +30,10 @@ export const LineItemSchema = z.object({
 });
 
 export const ContextSchema = z.object({
-  marketCondition: z.enum(MARKET_CONDITIONS),
+  // Legacy/private configs should not break totals extraction just because this
+  // contextual hint drifted. Unknown strings become neutral and are never
+  // forwarded raw to provider prompts.
+  marketCondition: z.preprocess(normalizeMarketCondition, z.enum(MARKET_CONDITIONS)),
   financialIndependence: z.boolean(),
   currentRole: z.string().min(1),
 });

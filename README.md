@@ -128,7 +128,51 @@ pnpm moneyguard path/to/real-timecard.png
 | `MONEY_GUARD_VISION_MODEL` | OCR model | `gemini-2.5-flash` |
 | `MONEY_GUARD_TEXT_MODEL` | Audit model | `deepseek-v4-flash` |
 | `MONEYGUARD_MOCK` | Force offline providers (`--mock`) | off |
-| `MONEY_GUARD_DEBUG` | Log the de-identified payload + diagnostics | off |
+| `MONEY_GUARD_DEBUG` | Enable safe diagnostics without payloads, headers, secrets, or env values | off |
+
+### Private `/extract` HTTP endpoint
+
+The private OCR endpoint is started with:
+
+```bash
+pnpm build
+node dist/http/server.js
+```
+
+Runtime contract:
+
+| Setting | Contract |
+| --- | --- |
+| `PORT` | HTTP server listens on this value when provided; otherwise falls back to `10000`. |
+| Bind host | The HTTP server binds to `0.0.0.0` so Render can route traffic to it. |
+| `HOST` | Ignored by the executable HTTP entrypoint. Use code-level `startExtractServer({ host })` only for embedded tests/tools. |
+| `MONEYGUARD_PIPELINE_CREDENTIAL` | Required bearer credential for `POST /extract`; keep present and masked in hosting UI. |
+| `GEMINI_API_KEY` | Required only for live OCR provider calls; keep present and masked in hosting UI. |
+| `MONEYGUARD_MOCK` | Must be `false` or unset for live OCR; set only for deterministic offline tests. |
+| `MONEY_GUARD_DEBUG` | Must be `false` or unset in hosted rehearsal/production; debug output is not needed for private OCR smoke checks. |
+| `MONEY_GUARD_VISION_MODEL` | Optional OCR model override; defaults to `gemini-2.5-flash`. |
+| `NODE_VERSION` | Use Node 22 on hosts that require an explicit runtime version. |
+| `finance.json` | Required at process root for hosted totals math; provide it as a host secret file, not a committed file. |
+
+`POST /extract` accepts `multipart/form-data` with `mode=real-ocr` and an `image` file. Accepted image MIME types are `image/png`, `image/jpeg`, and `image/webp`. The endpoint verifies that the declared MIME type matches the image signature before it calls the vision provider, and it passes the validated MIME type to Gemini. Mismatched or unsupported image types return `415`.
+
+Successful responses are totals-only:
+
+```json
+{
+  "source": "real-ocr",
+  "extraction": {
+    "totalHours": 38,
+    "hourlyRate": 25,
+    "grossWage": 950,
+    "currency": "AUD",
+    "confidence": 0.9,
+    "warnings": []
+  }
+}
+```
+
+The endpoint must never return raw image bytes, raw OCR text, filenames, MIME metadata, worker/employer metadata, or shift rows.
 
 ---
 
