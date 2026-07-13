@@ -10,7 +10,7 @@ export const DEFAULT_TEXT_MODEL = "deepseek-v4-flash";
 export interface MoneyGuardConfig {
   visionModel: string;
   textModel: string;
-  /** When true, log the de-identified payload + extra diagnostics. */
+  /** When true, enable safe diagnostics without payloads, secrets, or environment values. */
   debug: boolean;
   /** When true, force the deterministic offline mock providers. */
   mock: boolean;

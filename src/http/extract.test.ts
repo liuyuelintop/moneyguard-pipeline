@@ -24,8 +24,8 @@ function webpChunk(type: string, data: Buffer): Buffer {
   return Buffer.concat([Buffer.from(type, "ascii"), size, data, data.length % 2 ? Buffer.from([0]) : Buffer.alloc(0)]);
 }
 
-function webpFile(type: string, data: Buffer): Buffer {
-  const payload = Buffer.concat([Buffer.from("WEBP", "ascii"), webpChunk(type, data)]);
+function webpFile(...chunks: Buffer[]): Buffer {
+  const payload = Buffer.concat([Buffer.from("WEBP", "ascii"), ...chunks]);
   const riffSize = Buffer.alloc(4);
   riffSize.writeUInt32LE(payload.length, 0);
   return Buffer.concat([Buffer.from("RIFF", "ascii"), riffSize, payload]);
@@ -34,6 +34,7 @@ function webpFile(type: string, data: Buffer): Buffer {
 const PNG_BYTES = Buffer.concat([
   PNG_SIGNATURE,
   pngChunk("IHDR", Buffer.from([0, 0, 0, 1, 0, 0, 0, 1, 8, 2, 0, 0, 0])),
+  pngChunk("IDAT", Buffer.from([0])),
   pngChunk("IEND"),
 ]);
 const JPEG_BYTES = Buffer.concat([
@@ -42,7 +43,18 @@ const JPEG_BYTES = Buffer.concat([
   Buffer.from([0xff, 0xda, 0x00, 0x06, 0x00, 0x00, 0x00, 0x00]),
   Buffer.from([0x00, 0xff, 0xd9]),
 ]);
-const WEBP_BYTES = webpFile("VP8L", Buffer.from([0x2f, 0x00, 0x00, 0x00]));
+const VP8L_BYTES = Buffer.from([0x2f, 0x00, 0x00, 0x00, 0x00]);
+const WEBP_BYTES = webpFile(webpChunk("VP8L", VP8L_BYTES));
+const EXTENDED_WEBP_BYTES = webpFile(
+  webpChunk("VP8X", Buffer.from([0x08, 0, 0, 0, 0, 0, 0, 0, 0, 0])),
+  webpChunk("EXIF", Buffer.from([0x00, 0x01])),
+  webpChunk("VP8L", VP8L_BYTES),
+);
+const ANIMATED_WEBP_BYTES = webpFile(
+  webpChunk("VP8X", Buffer.from([0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0])),
+  webpChunk("ANIM", Buffer.alloc(6)),
+  webpChunk("ANMF", Buffer.concat([Buffer.alloc(16), webpChunk("VP8L", VP8L_BYTES)])),
+);
 
 const FINANCE = {
   hourlyRate: 30,
@@ -277,7 +289,20 @@ describe("POST /extract", () => {
     ],
     ["malformed PNG structure", Buffer.concat([PNG_SIGNATURE, pngChunk("IEND")]), "image/png", 415, { error: "Unsupported image type." }],
     ["malformed JPEG structure", Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0xff, 0xd9]), "image/jpeg", 415, { error: "Unsupported image type." }],
-    ["malformed WebP structure", webpFile("JUNK", Buffer.from([0])), "image/webp", 415, { error: "Unsupported image type." }],
+    [
+      "PNG without IDAT",
+      Buffer.concat([
+        PNG_SIGNATURE,
+        pngChunk("IHDR", Buffer.from([0, 0, 0, 1, 0, 0, 0, 1, 8, 2, 0, 0, 0])),
+        pngChunk("IEND"),
+      ]),
+      "image/png",
+      415,
+      { error: "Unsupported image type." },
+    ],
+    ["malformed WebP structure", webpFile(webpChunk("JUNK", Buffer.from([0]))), "image/webp", 415, { error: "Unsupported image type." }],
+    ["VP8X-only WebP", webpFile(webpChunk("VP8X", Buffer.alloc(10))), "image/webp", 415, { error: "Unsupported image type." }],
+    ["truncated multi-chunk WebP", EXTENDED_WEBP_BYTES.subarray(0, EXTENDED_WEBP_BYTES.length - 1), "image/webp", 415, { error: "Unsupported image type." }],
   ])("rejects %s before finance/provider work", async (_label, bytes, mimeType, status, body) => {
     const vision = new StubVision({ totalHours: 40, period: "2026-W27", confidence: "high" });
     const response = await handleExtractRequest(makeRequest(makeForm(new Blob([bytes], { type: mimeType }))), {
@@ -380,6 +405,23 @@ describe("POST /extract", () => {
   it("passes the validated WebP MIME type to the vision provider", async () => {
     const vision = new StubVision({ totalHours: 40, period: "2026-W27", confidence: "high" });
     const form = makeForm(new Blob([WEBP_BYTES], { type: "image/webp" }));
+
+    const response = await handleExtractRequest(makeRequest(form), {
+      credential: CREDENTIAL,
+      config: makeConfig(),
+      vision,
+    });
+
+    expect(response.status).toBe(200);
+    expect(vision.calls).toEqual([{ mimeType: "image/webp" }]);
+  });
+
+  it.each([
+    ["extended", EXTENDED_WEBP_BYTES],
+    ["animated", ANIMATED_WEBP_BYTES],
+  ])("accepts a legitimate %s multi-chunk WebP layout", async (_label, bytes) => {
+    const vision = new StubVision({ totalHours: 40, period: "2026-W27", confidence: "high" });
+    const form = makeForm(new Blob([bytes], { type: "image/webp" }));
 
     const response = await handleExtractRequest(makeRequest(form), {
       credential: CREDENTIAL,
