@@ -1,4 +1,4 @@
-export const SUPPORTED_IMAGE_MIME_TYPES = ["image/png", "image/jpeg", "image/webp"] as const;
+export const SUPPORTED_IMAGE_MIME_TYPES = ["image/png", "image/jpeg"] as const;
 
 export type SupportedImageMimeType = (typeof SUPPORTED_IMAGE_MIME_TYPES)[number];
 
@@ -98,101 +98,9 @@ function isJpeg(bytes: Buffer): boolean {
   return sawSegment && sawScan;
 }
 
-interface WebpChunkScan {
-  valid: boolean;
-  hasImageData: boolean;
-}
-
-function isVp8ImageData(data: Buffer): boolean {
-  return (
-    data.length >= 10 &&
-    (data[0]! & 0x01) === 0 &&
-    data[3] === 0x9d &&
-    data[4] === 0x01 &&
-    data[5] === 0x2a
-  );
-}
-
-function isVp8lImageData(data: Buffer): boolean {
-  return data.length >= 5 && data[0] === 0x2f && (data[4]! >> 5) === 0;
-}
-
-function scanWebpChunks(bytes: Buffer, start: number, end: number, allowVp8x: boolean): WebpChunkScan {
-  let offset = start;
-  let chunkIndex = 0;
-  let sawVp8x = false;
-  let hasImageData = false;
-
-  while (offset < end) {
-    if (offset + 8 > end) return { valid: false, hasImageData: false };
-
-    const chunkType = bytes.subarray(offset, offset + 4).toString("ascii");
-    const chunkSize = bytes.readUInt32LE(offset + 4);
-    const dataStart = offset + 8;
-    const dataEnd = dataStart + chunkSize;
-    const paddedEnd = dataEnd + (chunkSize % 2);
-    if (dataEnd > end || paddedEnd > end) return { valid: false, hasImageData: false };
-
-    const data = bytes.subarray(dataStart, dataEnd);
-    if (chunkType === "VP8X") {
-      if (!allowVp8x || chunkIndex !== 0 || sawVp8x || chunkSize !== 10) {
-        return { valid: false, hasImageData: false };
-      }
-      sawVp8x = true;
-    } else if (chunkType === "VP8 ") {
-      if (!isVp8ImageData(data)) return { valid: false, hasImageData: false };
-      hasImageData = true;
-    } else if (chunkType === "VP8L") {
-      if (!isVp8lImageData(data)) return { valid: false, hasImageData: false };
-      hasImageData = true;
-    } else if (chunkType === "ANMF") {
-      if (data.length < 16) return { valid: false, hasImageData: false };
-      const frameChunks = scanWebpChunks(bytes, dataStart + 16, dataEnd, false);
-      if (!frameChunks.valid || !frameChunks.hasImageData) {
-        return { valid: false, hasImageData: false };
-      }
-      hasImageData = true;
-    } else if (!isKnownWebpMetadataChunk(chunkType)) {
-      return { valid: false, hasImageData: false };
-    }
-
-    offset = paddedEnd;
-    chunkIndex++;
-  }
-
-  return { valid: offset === end, hasImageData };
-}
-
-function isKnownWebpMetadataChunk(chunkType: string): boolean {
-  return (
-    chunkType === "ALPH" ||
-    chunkType === "ANIM" ||
-    chunkType === "ICCP" ||
-    chunkType === "EXIF" ||
-    chunkType === "XMP "
-  );
-}
-
-function isWebp(bytes: Buffer): boolean {
-  if (
-    bytes.length < 24 ||
-    bytes.subarray(0, 4).toString("ascii") !== "RIFF" ||
-    bytes.subarray(8, 12).toString("ascii") !== "WEBP"
-  ) {
-    return false;
-  }
-
-  const riffSize = bytes.readUInt32LE(4);
-  if (riffSize !== bytes.length - 8) return false;
-
-  const chunks = scanWebpChunks(bytes, 12, bytes.length, true);
-  return chunks.valid && chunks.hasImageData;
-}
-
 export function detectImageMimeType(bytes: Buffer): SupportedImageMimeType | undefined {
   if (isPng(bytes)) return "image/png";
   if (isJpeg(bytes)) return "image/jpeg";
-  if (isWebp(bytes)) return "image/webp";
   return undefined;
 }
 

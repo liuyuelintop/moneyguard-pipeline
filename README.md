@@ -156,7 +156,7 @@ Runtime contract:
 
 `POST /extract` accepts `multipart/form-data` with `mode=real-ocr` and an `image` file. Authentication is checked before the request body is read. The image cap is 5 MiB, and the total HTTP request cap is 5 MiB + 256 KiB to allow multipart overhead; requests over the total cap return `413` before multipart parsing.
 
-Accepted image MIME types are `image/png`, `image/jpeg`, and `image/webp`; `image/jpg` is normalized to canonical `image/jpeg`. The endpoint verifies that the declared MIME type matches a bounded container-structure check before it calls the vision provider, and it passes the validated canonical MIME type to Gemini. The checks require PNG `IDAT` before `IEND`, JPEG segment structure with `EOI`, and bounded RIFF/WebP chunks containing still or animated image data; they are not complete image decoding. Mismatched, malformed, or unsupported image types return `415`.
+Accepted image MIME types are `image/png` and `image/jpeg`; `image/jpg` is normalized to canonical `image/jpeg`. `image/webp` is not accepted for the rehearsal contract. The endpoint verifies that the declared MIME type matches a bounded container-structure check before it calls the vision provider, and it passes the validated canonical MIME type to Gemini. The checks require PNG `IDAT` before `IEND` and JPEG segment structure with `EOI`; they are not complete image decoding. Mismatched, malformed, or unsupported image types return `415`.
 
 Successful responses are totals-only:
 

@@ -24,12 +24,6 @@ function webpChunk(type: string, data: Buffer): Buffer {
   return Buffer.concat([Buffer.from(type, "ascii"), size, data, data.length % 2 ? Buffer.from([0]) : Buffer.alloc(0)]);
 }
 
-function webpChunkWithDeclaredSize(type: string, declaredSize: number, data: Buffer): Buffer {
-  const size = Buffer.alloc(4);
-  size.writeUInt32LE(declaredSize, 0);
-  return Buffer.concat([Buffer.from(type, "ascii"), size, data, data.length % 2 ? Buffer.from([0]) : Buffer.alloc(0)]);
-}
-
 function webpFile(...chunks: Buffer[]): Buffer {
   const payload = Buffer.concat([Buffer.from("WEBP", "ascii"), ...chunks]);
   const riffSize = Buffer.alloc(4);
@@ -51,16 +45,9 @@ const JPEG_BYTES = Buffer.concat([
 ]);
 const VP8L_BYTES = Buffer.from([0x2f, 0x00, 0x00, 0x00, 0x00]);
 const WEBP_BYTES = webpFile(webpChunk("VP8L", VP8L_BYTES));
-const EXTENDED_WEBP_BYTES = webpFile(
-  webpChunk("VP8X", Buffer.from([0x08, 0, 0, 0, 0, 0, 0, 0, 0, 0])),
-  webpChunk("EXIF", Buffer.from([0x00, 0x01])),
-  webpChunk("VP8L", VP8L_BYTES),
-);
-const ANIMATED_WEBP_BYTES = webpFile(
-  webpChunk("VP8X", Buffer.from([0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0])),
-  webpChunk("ANIM", Buffer.alloc(6)),
-  webpChunk("ANMF", Buffer.concat([Buffer.alloc(16), webpChunk("VP8L", VP8L_BYTES)])),
-);
+const VP8X_ONLY_WEBP_BYTES = webpFile(webpChunk("VP8X", Buffer.alloc(10)));
+const ANMF_ONLY_WEBP_BYTES = webpFile(webpChunk("ANMF", Buffer.concat([Buffer.alloc(16), webpChunk("VP8L", VP8L_BYTES)])));
+const METADATA_FIRST_WEBP_BYTES = webpFile(webpChunk("EXIF", Buffer.from([0x00, 0x01])), webpChunk("VP8L", VP8L_BYTES));
 
 const FINANCE = {
   hourlyRate: 30,
@@ -306,22 +293,6 @@ describe("POST /extract", () => {
       415,
       { error: "Unsupported image type." },
     ],
-    [
-      "unknown WebP chunk",
-      webpFile(webpChunk("JUNK", Buffer.from([0])), webpChunk("VP8L", VP8L_BYTES)),
-      "image/webp",
-      415,
-      { error: "Unsupported image type." },
-    ],
-    ["VP8X-only WebP", webpFile(webpChunk("VP8X", Buffer.alloc(10))), "image/webp", 415, { error: "Unsupported image type." }],
-    [
-      "oversized WebP chunk declaration",
-      webpFile(webpChunkWithDeclaredSize("VP8L", VP8L_BYTES.length + 4, VP8L_BYTES)),
-      "image/webp",
-      415,
-      { error: "Unsupported image type." },
-    ],
-    ["truncated multi-chunk WebP", EXTENDED_WEBP_BYTES.subarray(0, EXTENDED_WEBP_BYTES.length - 1), "image/webp", 415, { error: "Unsupported image type." }],
   ])("rejects %s before finance/provider work", async (_label, bytes, mimeType, status, body) => {
     const vision = new StubVision({ totalHours: 40, period: "2026-W27", confidence: "high" });
     const response = await handleExtractRequest(makeRequest(makeForm(new Blob([bytes], { type: mimeType }))), {
@@ -332,6 +303,26 @@ describe("POST /extract", () => {
 
     expect(response.status).toBe(status);
     expect(await parse(response)).toEqual(body);
+    expect(vision.calls).toHaveLength(0);
+  });
+
+  it.each([
+    ["valid-looking WebP", WEBP_BYTES, "image/webp"],
+    ["VP8X-only WebP", VP8X_ONLY_WEBP_BYTES, "image/webp"],
+    ["ANMF-only WebP", ANMF_ONLY_WEBP_BYTES, "image/webp"],
+    ["metadata-first WebP", METADATA_FIRST_WEBP_BYTES, "image/webp"],
+    ["declared WebP with non-WebP bytes", PNG_BYTES, "image/webp"],
+    ["WebP bytes declared as PNG", WEBP_BYTES, "image/png"],
+  ])("rejects unsupported %s before finance/provider work", async (_label, bytes, mimeType) => {
+    const vision = new StubVision({ totalHours: 40, period: "2026-W27", confidence: "high" });
+    const response = await handleExtractRequest(makeRequest(makeForm(new Blob([bytes], { type: mimeType }))), {
+      credential: CREDENTIAL,
+      config: makeConfig("/finance-should-not-be-read.json"),
+      vision,
+    });
+
+    expect(response.status).toBe(415);
+    expect(await parse(response)).toEqual({ error: "Unsupported image type." });
     expect(vision.calls).toHaveLength(0);
   });
 
@@ -419,37 +410,6 @@ describe("POST /extract", () => {
 
     expect(response.status).toBe(200);
     expect(vision.calls).toEqual([{ mimeType: "image/jpeg" }]);
-  });
-
-  it("passes the validated WebP MIME type for a single-chunk WebP", async () => {
-    const vision = new StubVision({ totalHours: 40, period: "2026-W27", confidence: "high" });
-    const form = makeForm(new Blob([WEBP_BYTES], { type: "image/webp" }));
-
-    const response = await handleExtractRequest(makeRequest(form), {
-      credential: CREDENTIAL,
-      config: makeConfig(),
-      vision,
-    });
-
-    expect(response.status).toBe(200);
-    expect(vision.calls).toEqual([{ mimeType: "image/webp" }]);
-  });
-
-  it.each([
-    ["extended", EXTENDED_WEBP_BYTES],
-    ["animated", ANIMATED_WEBP_BYTES],
-  ])("accepts a legitimate %s multi-chunk WebP layout", async (_label, bytes) => {
-    const vision = new StubVision({ totalHours: 40, period: "2026-W27", confidence: "high" });
-    const form = makeForm(new Blob([bytes], { type: "image/webp" }));
-
-    const response = await handleExtractRequest(makeRequest(form), {
-      credential: CREDENTIAL,
-      config: makeConfig(),
-      vision,
-    });
-
-    expect(response.status).toBe(200);
-    expect(vision.calls).toEqual([{ mimeType: "image/webp" }]);
   });
 
   it("returns a generic provider failure without leaking provider details", async () => {
