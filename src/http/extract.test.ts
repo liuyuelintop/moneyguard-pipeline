@@ -8,10 +8,41 @@ import type { VisionProvider } from "../providers/types.js";
 import type { SupportedImageMimeType } from "../image.js";
 
 const CREDENTIAL = "test-private-token";
-const PNG_BYTES = Buffer.from([
-  0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x00,
+const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+const JPEG_SIGNATURE = Buffer.from([0xff, 0xd8, 0xff]);
+const BOUNDARY = "moneyguard-boundary";
+
+function pngChunk(type: string, data = Buffer.alloc(0)): Buffer {
+  const length = Buffer.alloc(4);
+  length.writeUInt32BE(data.length, 0);
+  return Buffer.concat([length, Buffer.from(type, "ascii"), data, Buffer.alloc(4)]);
+}
+
+function webpChunk(type: string, data: Buffer): Buffer {
+  const size = Buffer.alloc(4);
+  size.writeUInt32LE(data.length, 0);
+  return Buffer.concat([Buffer.from(type, "ascii"), size, data, data.length % 2 ? Buffer.from([0]) : Buffer.alloc(0)]);
+}
+
+function webpFile(type: string, data: Buffer): Buffer {
+  const payload = Buffer.concat([Buffer.from("WEBP", "ascii"), webpChunk(type, data)]);
+  const riffSize = Buffer.alloc(4);
+  riffSize.writeUInt32LE(payload.length, 0);
+  return Buffer.concat([Buffer.from("RIFF", "ascii"), riffSize, payload]);
+}
+
+const PNG_BYTES = Buffer.concat([
+  PNG_SIGNATURE,
+  pngChunk("IHDR", Buffer.from([0, 0, 0, 1, 0, 0, 0, 1, 8, 2, 0, 0, 0])),
+  pngChunk("IEND"),
 ]);
-const JPEG_BYTES = Buffer.from([0xff, 0xd8, 0xff, 0x00]);
+const JPEG_BYTES = Buffer.concat([
+  Buffer.from([0xff, 0xd8]),
+  Buffer.from([0xff, 0xe0, 0x00, 0x04, 0x00, 0x00]),
+  Buffer.from([0xff, 0xda, 0x00, 0x06, 0x00, 0x00, 0x00, 0x00]),
+  Buffer.from([0x00, 0xff, 0xd9]),
+]);
+const WEBP_BYTES = webpFile("VP8L", Buffer.from([0x2f, 0x00, 0x00, 0x00]));
 
 const FINANCE = {
   hourlyRate: 30,
@@ -68,6 +99,52 @@ function makeForm(image: Blob = new Blob([PNG_BYTES], { type: "image/png" })): F
   return form;
 }
 
+function makeRawMultipartBody(parts: Array<{ name: string; value: string } | {
+  name: string;
+  filename: string;
+  contentType: string;
+  bytes: Buffer;
+}>): Buffer {
+  const chunks: Buffer[] = [];
+  for (const part of parts) {
+    chunks.push(Buffer.from(`--${BOUNDARY}\r\n`));
+    if ("filename" in part) {
+      chunks.push(
+        Buffer.from(
+          `Content-Disposition: form-data; name="${part.name}"; filename="${part.filename}"\r\n` +
+            `Content-Type: ${part.contentType}\r\n\r\n`,
+        ),
+      );
+      chunks.push(part.bytes);
+      chunks.push(Buffer.from("\r\n"));
+    } else {
+      chunks.push(Buffer.from(`Content-Disposition: form-data; name="${part.name}"\r\n\r\n${part.value}\r\n`));
+    }
+  }
+  chunks.push(Buffer.from(`--${BOUNDARY}--\r\n`));
+  return Buffer.concat(chunks);
+}
+
+function makeRawRequest(body: Buffer | ReadableStream<Uint8Array>, headers: Record<string, string> = {}): Request {
+  return new Request("http://127.0.0.1/extract", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${CREDENTIAL}`,
+      "Content-Type": `multipart/form-data; boundary=${BOUNDARY}`,
+      ...headers,
+    },
+    body,
+    duplex: "half",
+  } as RequestInit & { duplex: "half" });
+}
+
+function validRawBody(image = PNG_BYTES, contentType = "image/png"): Buffer {
+  return makeRawMultipartBody([
+    { name: "mode", value: "real-ocr" },
+    { name: "image", filename: "timecard", contentType, bytes: image },
+  ]);
+}
+
 async function parse(response: Response): Promise<Record<string, unknown>> {
   return (await response.json()) as Record<string, unknown>;
 }
@@ -79,6 +156,7 @@ afterEach(() => {
 
 describe("POST /extract", () => {
   it("rejects missing bearer auth before calling the provider", async () => {
+    const formData = vi.spyOn(Request.prototype, "formData");
     const vision = new StubVision({ totalHours: 40, period: "2026-W27", confidence: "high" });
     const request = new Request("http://127.0.0.1/extract", {
       method: "POST",
@@ -87,13 +165,87 @@ describe("POST /extract", () => {
 
     const response = await handleExtractRequest(request, {
       credential: CREDENTIAL,
-      config: makeConfig(),
+      config: makeConfig("/finance-should-not-be-read.json"),
       vision,
     });
 
     expect(response.status).toBe(401);
     expect(await parse(response)).toEqual({ error: "Unauthorized." });
     expect(vision.calls).toHaveLength(0);
+    expect(formData).not.toHaveBeenCalled();
+  });
+
+  it("rejects excessive declared Content-Length before parsing or loading finance", async () => {
+    const vision = new StubVision({ totalHours: 40, period: "2026-W27", confidence: "high" });
+    const body = validRawBody();
+
+    const response = await handleExtractRequest(makeRawRequest(body, { "Content-Length": String(body.length + 1) }), {
+      credential: CREDENTIAL,
+      config: makeConfig("/finance-should-not-be-read.json"),
+      maxRequestBytes: body.length,
+      vision,
+    });
+
+    expect(response.status).toBe(413);
+    expect(await parse(response)).toEqual({ error: "Request is too large." });
+    expect(vision.calls).toHaveLength(0);
+  });
+
+  it("rejects missing Content-Length streamed bodies that exceed the request cap", async () => {
+    const vision = new StubVision({ totalHours: 40, period: "2026-W27", confidence: "high" });
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array(33));
+        controller.close();
+      },
+    });
+
+    const response = await handleExtractRequest(makeRawRequest(stream), {
+      credential: CREDENTIAL,
+      config: makeConfig("/finance-should-not-be-read.json"),
+      maxRequestBytes: 32,
+      vision,
+    });
+
+    expect(response.status).toBe(413);
+    expect(await parse(response)).toEqual({ error: "Request is too large." });
+    expect(vision.calls).toHaveLength(0);
+  });
+
+  it("rejects oversized non-image form fields at the total request boundary", async () => {
+    const vision = new StubVision({ totalHours: 40, period: "2026-W27", confidence: "high" });
+    const body = makeRawMultipartBody([
+      { name: "mode", value: "real-ocr" },
+      { name: "notes", value: "x".repeat(128) },
+      { name: "image", filename: "timecard", contentType: "image/png", bytes: PNG_BYTES },
+    ]);
+
+    const response = await handleExtractRequest(makeRawRequest(body), {
+      credential: CREDENTIAL,
+      config: makeConfig("/finance-should-not-be-read.json"),
+      maxRequestBytes: body.length - 1,
+      vision,
+    });
+
+    expect(response.status).toBe(413);
+    expect(await parse(response)).toEqual({ error: "Request is too large." });
+    expect(vision.calls).toHaveLength(0);
+  });
+
+  it("accepts a request exactly at the total request cap", async () => {
+    const vision = new StubVision({ totalHours: 40, period: "2026-W27", confidence: "high" });
+    const body = validRawBody();
+
+    const response = await handleExtractRequest(makeRawRequest(body, { "Content-Length": String(body.length) }), {
+      credential: CREDENTIAL,
+      config: makeConfig(),
+      maxImageBytes: PNG_BYTES.length,
+      maxRequestBytes: body.length,
+      vision,
+    });
+
+    expect(response.status).toBe(200);
+    expect(vision.calls).toEqual([{ mimeType: "image/png" }]);
   });
 
   it("rejects invalid multipart payloads before calling the provider", async () => {
@@ -111,6 +263,34 @@ describe("POST /extract", () => {
     expect(vision.calls).toHaveLength(0);
   });
 
+  it.each([
+    ["empty input", Buffer.alloc(0), "image/png", 400, { error: "Invalid image upload." }],
+    ["truncated PNG", PNG_BYTES.subarray(0, PNG_BYTES.length - 1), "image/png", 415, { error: "Unsupported image type." }],
+    ["signature-only PNG", PNG_SIGNATURE, "image/png", 415, { error: "Unsupported image type." }],
+    ["signature-only JPEG", JPEG_SIGNATURE, "image/jpeg", 415, { error: "Unsupported image type." }],
+    [
+      "signature-only WebP",
+      Buffer.concat([Buffer.from("RIFF"), Buffer.alloc(4), Buffer.from("WEBP")]),
+      "image/webp",
+      415,
+      { error: "Unsupported image type." },
+    ],
+    ["malformed PNG structure", Buffer.concat([PNG_SIGNATURE, pngChunk("IEND")]), "image/png", 415, { error: "Unsupported image type." }],
+    ["malformed JPEG structure", Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0xff, 0xd9]), "image/jpeg", 415, { error: "Unsupported image type." }],
+    ["malformed WebP structure", webpFile("JUNK", Buffer.from([0])), "image/webp", 415, { error: "Unsupported image type." }],
+  ])("rejects %s before finance/provider work", async (_label, bytes, mimeType, status, body) => {
+    const vision = new StubVision({ totalHours: 40, period: "2026-W27", confidence: "high" });
+    const response = await handleExtractRequest(makeRequest(makeForm(new Blob([bytes], { type: mimeType }))), {
+      credential: CREDENTIAL,
+      config: makeConfig("/finance-should-not-be-read.json"),
+      vision,
+    });
+
+    expect(response.status).toBe(status);
+    expect(await parse(response)).toEqual(body);
+    expect(vision.calls).toHaveLength(0);
+  });
+
   it("rejects declared MIME types that do not match the image signature", async () => {
     const vision = new StubVision({ totalHours: 40, period: "2026-W27", confidence: "high" });
     const form = makeForm(new Blob([PNG_BYTES], { type: "image/jpeg" }));
@@ -118,6 +298,36 @@ describe("POST /extract", () => {
     const response = await handleExtractRequest(makeRequest(form), {
       credential: CREDENTIAL,
       config: makeConfig(),
+      vision,
+    });
+
+    expect(response.status).toBe(415);
+    expect(await parse(response)).toEqual({ error: "Unsupported image type." });
+    expect(vision.calls).toHaveLength(0);
+  });
+
+  it("rejects declared PNG when the bytes are JPEG", async () => {
+    const vision = new StubVision({ totalHours: 40, period: "2026-W27", confidence: "high" });
+    const form = makeForm(new Blob([JPEG_BYTES], { type: "image/png" }));
+
+    const response = await handleExtractRequest(makeRequest(form), {
+      credential: CREDENTIAL,
+      config: makeConfig("/finance-should-not-be-read.json"),
+      vision,
+    });
+
+    expect(response.status).toBe(415);
+    expect(await parse(response)).toEqual({ error: "Unsupported image type." });
+    expect(vision.calls).toHaveLength(0);
+  });
+
+  it("rejects unsupported declared MIME types", async () => {
+    const vision = new StubVision({ totalHours: 40, period: "2026-W27", confidence: "high" });
+    const form = makeForm(new Blob([PNG_BYTES], { type: "application/octet-stream" }));
+
+    const response = await handleExtractRequest(makeRequest(form), {
+      credential: CREDENTIAL,
+      config: makeConfig("/finance-should-not-be-read.json"),
       vision,
     });
 
@@ -153,6 +363,34 @@ describe("POST /extract", () => {
     expect(vision.calls).toEqual([{ mimeType: "image/jpeg" }]);
   });
 
+  it("normalizes image/jpg to the canonical JPEG MIME type", async () => {
+    const vision = new StubVision({ totalHours: 40, period: "2026-W27", confidence: "high" });
+    const form = makeForm(new Blob([JPEG_BYTES], { type: "image/jpg" }));
+
+    const response = await handleExtractRequest(makeRequest(form), {
+      credential: CREDENTIAL,
+      config: makeConfig(),
+      vision,
+    });
+
+    expect(response.status).toBe(200);
+    expect(vision.calls).toEqual([{ mimeType: "image/jpeg" }]);
+  });
+
+  it("passes the validated WebP MIME type to the vision provider", async () => {
+    const vision = new StubVision({ totalHours: 40, period: "2026-W27", confidence: "high" });
+    const form = makeForm(new Blob([WEBP_BYTES], { type: "image/webp" }));
+
+    const response = await handleExtractRequest(makeRequest(form), {
+      credential: CREDENTIAL,
+      config: makeConfig(),
+      vision,
+    });
+
+    expect(response.status).toBe(200);
+    expect(vision.calls).toEqual([{ mimeType: "image/webp" }]);
+  });
+
   it("returns a generic provider failure without leaking provider details", async () => {
     const vision = new StubVision(null, new Error("raw OCR text and vendor secret"));
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
@@ -167,7 +405,24 @@ describe("POST /extract", () => {
     expect(response.status).toBe(502);
     expect(body).toEqual({ error: "OCR provider failed." });
     expect(JSON.stringify(body)).not.toContain("raw OCR text");
-    expect(consoleError).toHaveBeenCalledWith("[moneyGuard] vision_provider_failed");
+    expect(consoleError).toHaveBeenCalledWith("[moneyGuard] provider_unknown_failure");
+  });
+
+  it("logs provider rate-limit failures as a fixed safe category", async () => {
+    const error = Object.assign(new Error("vendor raw response body"), { status: 429 });
+    const vision = new StubVision(null, error);
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const response = await handleExtractRequest(makeRequest(makeForm()), {
+      credential: CREDENTIAL,
+      config: makeConfig(),
+      vision,
+    });
+
+    const logged = consoleError.mock.calls.flat().join(" ");
+    expect(response.status).toBe(502);
+    expect(logged).toContain("[moneyGuard] provider_rate_limited");
+    expect(logged).not.toContain("vendor raw response body");
   });
 
   it("rejects invalid OCR output", async () => {
@@ -220,6 +475,7 @@ describe("POST /extract", () => {
 
   it("normalizes unknown marketCondition values without exposing the raw value", async () => {
     const privateMarketMarker = "private-market-condition-marker";
+    const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const vision = new StubVision({ totalHours: 40, period: "2026-W27", confidence: "high" });
 
     const response = await handleExtractRequest(makeRequest(makeForm()), {
@@ -236,6 +492,7 @@ describe("POST /extract", () => {
     const body = await parse(response);
     expect(response.status).toBe(200);
     expect(JSON.stringify(body)).not.toContain(privateMarketMarker);
+    expect(consoleWarn).toHaveBeenCalledWith("[moneyGuard] market_condition_normalized");
   });
 
   it("logs finance config failures without dumping raw Zod objects or config values", async () => {

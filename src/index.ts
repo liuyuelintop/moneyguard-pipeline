@@ -15,6 +15,7 @@ export {
 } from "./extract.js";
 export {
   DEFAULT_MAX_IMAGE_BYTES,
+  DEFAULT_MAX_REQUEST_BYTES,
   handleExtractRequest,
   type ExtractEndpointOptions,
 } from "./http/extract.js";

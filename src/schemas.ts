@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { logSafeDiagnostic } from "./safe-log.js";
 
 // Closed code sets keep aggregation type-safe and the config contract explicit.
 export const CADENCES = ["monthly", "weekly"] as const;
@@ -19,6 +20,7 @@ function normalizeMarketCondition(value: unknown): unknown {
   if (typeof value !== "string") return value;
   const normalized = value.trim();
   if ((MARKET_CONDITIONS as readonly string[]).includes(normalized)) return normalized as MarketCondition;
+  logSafeDiagnostic("market_condition_normalized");
   return "neutral" satisfies MarketCondition;
 }
 

@@ -15,7 +15,7 @@ import {
   withRetry,
 } from "./resilience.js";
 import { DEFAULT_IMAGE_MIME_TYPE, detectImageMimeType, type SupportedImageMimeType } from "./image.js";
-import { logSafeError, summarizeConfigError, summarizeValidationError } from "./safe-log.js";
+import { logSafeError, providerFailureCategory, summarizeConfigError } from "./safe-log.js";
 import { type Finance, FinanceSchema, VisionResultSchema } from "./schemas.js";
 
 export interface PipelineCallbacks {
@@ -48,7 +48,7 @@ export async function runMoneyGuardPipeline(
 ): Promise<PipelineResult> {
   const cfg = config ?? loadConfig();
   const { vision, audit } = providers ?? selectProviders(cfg);
-  const { visionModel, textModel, financePath } = cfg;
+  const { visionModel, financePath } = cfg;
   const isDebug = (): boolean => cfg.debug;
 
   // Step 1: parallel I/O — OCR (with retry) and the local finance ledger are independent.
@@ -78,14 +78,14 @@ export async function runMoneyGuardPipeline(
         message: "System Error: finance.json is missing or invalid.",
       };
     }
-    logSafeError("vision_provider_failed");
+    logSafeError(providerFailureCategory(err));
     return { ok: false, kind: "vision", message: toUserMessage(err) };
   }
 
   // Step 2: validate untrusted OCR output — never trust a cast.
   const parsed = VisionResultSchema.safeParse(rawOcr);
   if (!parsed.success) {
-    if (isDebug()) logSafeError("ocr_validation_failed", summarizeValidationError(parsed.error));
+    if (isDebug()) logSafeError("provider_invalid_response");
     return {
       ok: false,
       kind: "vision",
@@ -99,7 +99,7 @@ export async function runMoneyGuardPipeline(
   const payload = buildAuditPayload(metrics, ocr, finance.context);
 
   // Safe metadata only — never provider payloads, OCR text, ledger values, or env values.
-  console.log(`[moneyGuard] ok period=${ocr.period} confidence=${ocr.confidence} tier=${metrics.tier}`);
+  console.log(`[moneyGuard] ok confidence=${ocr.confidence} tier=${metrics.tier}`);
 
   // Step 4: stream the audit. Retry only covers connection establishment (see resilience.ts).
   try {
@@ -115,7 +115,7 @@ export async function runMoneyGuardPipeline(
     await onReportUpdate(buildReport(ocr, metrics, accumulated), true);
     return { ok: true };
   } catch (err) {
-    logSafeError("audit_stream_failed");
+    logSafeError(providerFailureCategory(err));
     return { ok: false, kind: "model", message: toUserMessage(err) };
   }
 }

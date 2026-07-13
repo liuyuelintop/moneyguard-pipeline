@@ -7,7 +7,7 @@ import { VISION_PROMPT } from "./prompts.js";
 import { selectProviders } from "./providers/index.js";
 import type { VisionProvider } from "./providers/types.js";
 import { toUserMessage, VISION_RETRY_POLICY, withRetry } from "./resilience.js";
-import { logSafeError, summarizeConfigError, summarizeValidationError } from "./safe-log.js";
+import { logSafeError, providerFailureCategory, summarizeConfigError } from "./safe-log.js";
 import { type Finance, FinanceSchema, VisionResultSchema } from "./schemas.js";
 
 export type ExtractionFailureKind = "config" | "provider" | "invalid-ocr";
@@ -82,13 +82,13 @@ export async function extractMoneyGuardTotals(
         message: "System Error: finance.json is missing or invalid.",
       };
     }
-    logSafeError("vision_provider_failed");
+    logSafeError(providerFailureCategory(err));
     return { ok: false, kind: "provider", message: toUserMessage(err) };
   }
 
   const parsed = VisionResultSchema.safeParse(rawOcr);
   if (!parsed.success) {
-    if (config.debug) logSafeError("ocr_validation_failed", summarizeValidationError(parsed.error));
+    if (config.debug) logSafeError("provider_invalid_response");
     return {
       ok: false,
       kind: "invalid-ocr",

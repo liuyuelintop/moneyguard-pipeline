@@ -197,8 +197,33 @@ describe("pipeline — finance.json schema validation", () => {
     expect(audit.calls).toHaveLength(0);
   });
 
+  it.each(["hostile_to_intl_grads", "neutral", "favorable"] as const)(
+    "preserves recognised marketCondition value %s without emitting a diagnostic",
+    async (marketCondition) => {
+      const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const { providers, audit } = makeProviders(goodOcr);
+      const config = makeConfig(
+        writeFinance({
+          ...SENTINEL_FINANCE,
+          context: { ...SENTINEL_FINANCE.context, marketCondition },
+        }),
+      );
+
+      const result = await runMoneyGuardPipeline(Buffer.from("img"), {
+        providers,
+        config,
+        onReportUpdate: noop,
+      });
+
+      expect(result.ok).toBe(true);
+      expect(audit.calls).toHaveLength(1);
+      expect(consoleWarn).not.toHaveBeenCalledWith("[moneyGuard] market_condition_normalized");
+    },
+  );
+
   it("normalizes unknown marketCondition values without forwarding the raw value", async () => {
     const privateMarketMarker = "private-market-condition-marker";
+    const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const { providers, audit } = makeProviders(goodOcr);
     const config = makeConfig(
       writeFinance({
@@ -216,5 +241,44 @@ describe("pipeline — finance.json schema validation", () => {
     expect(result.ok).toBe(true);
     expect(audit.calls).toHaveLength(1);
     expect(audit.calls[0]!.userPrompt).not.toContain(privateMarketMarker);
+    expect(consoleWarn).toHaveBeenCalledWith("[moneyGuard] market_condition_normalized");
+  });
+
+  it("rejects non-string marketCondition values", async () => {
+    const { providers, audit } = makeProviders(goodOcr);
+    const config = makeConfig(
+      writeFinance({
+        ...SENTINEL_FINANCE,
+        context: { ...SENTINEL_FINANCE.context, marketCondition: 123 },
+      }),
+    );
+
+    const result = await runMoneyGuardPipeline(Buffer.from("img"), {
+      providers,
+      config,
+      onReportUpdate: noop,
+    });
+
+    expect(result).toMatchObject({ ok: false, kind: "config" });
+    expect(audit.calls).toHaveLength(0);
+  });
+
+  it("still rejects unrelated malformed context fields", async () => {
+    const { providers, audit } = makeProviders(goodOcr);
+    const config = makeConfig(
+      writeFinance({
+        ...SENTINEL_FINANCE,
+        context: { ...SENTINEL_FINANCE.context, currentRole: "" },
+      }),
+    );
+
+    const result = await runMoneyGuardPipeline(Buffer.from("img"), {
+      providers,
+      config,
+      onReportUpdate: noop,
+    });
+
+    expect(result).toMatchObject({ ok: false, kind: "config" });
+    expect(audit.calls).toHaveLength(0);
   });
 });

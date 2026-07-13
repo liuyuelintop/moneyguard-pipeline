@@ -9,10 +9,12 @@ import {
 import type { VisionProvider } from "../providers/types.js";
 
 export const DEFAULT_MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+export const DEFAULT_MAX_REQUEST_BYTES = DEFAULT_MAX_IMAGE_BYTES + 256 * 1024;
 
 export interface ExtractEndpointOptions {
   credential?: string;
   maxImageBytes?: number;
+  maxRequestBytes?: number;
   config?: MoneyGuardConfig;
   vision?: VisionProvider;
 }
@@ -38,23 +40,69 @@ function isAuthorized(header: string | null, credential: string): boolean {
   return safeEqual(header.slice(prefix.length), credential);
 }
 
-async function readMultipartImage(request: Request, maxImageBytes: number): Promise<UploadedImage | Response> {
+async function readBoundedRequestBody(request: Request, maxRequestBytes: number): Promise<Buffer | Response> {
+  const contentLength = request.headers.get("content-length");
+  if (contentLength !== null) {
+    const declaredLength = Number(contentLength);
+    if (Number.isFinite(declaredLength) && declaredLength > maxRequestBytes) {
+      return json(413, { error: "Request is too large." });
+    }
+  }
+
+  if (!request.body) return Buffer.alloc(0);
+
+  const chunks: Buffer[] = [];
+  let totalBytes = 0;
+  const reader = request.body.getReader();
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      totalBytes += value.byteLength;
+      if (totalBytes > maxRequestBytes) {
+        await reader.cancel().catch(() => {});
+        return json(413, { error: "Request is too large." });
+      }
+      chunks.push(Buffer.from(value));
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  return Buffer.concat(chunks, totalBytes);
+}
+
+async function parseBoundedMultipartForm(request: Request, maxRequestBytes: number): Promise<FormData | Response> {
   const contentType = request.headers.get("content-type") ?? "";
   if (!contentType.toLowerCase().startsWith("multipart/form-data")) {
     return json(400, { error: "Expected multipart/form-data." });
   }
 
-  const contentLength = request.headers.get("content-length");
-  if (contentLength !== null && Number(contentLength) > maxImageBytes + 64 * 1024) {
-    return json(413, { error: "Image is too large." });
-  }
+  const body = await readBoundedRequestBody(request, maxRequestBytes);
+  if (body instanceof Response) return body;
 
-  let form: FormData;
+  const boundedRequest = new Request(request.url, {
+    method: request.method,
+    headers: request.headers,
+    body,
+  });
+
   try {
-    form = await request.formData();
+    return await boundedRequest.formData();
   } catch {
     return json(400, { error: "Invalid multipart payload." });
   }
+}
+
+async function readMultipartImage(
+  request: Request,
+  maxImageBytes: number,
+  maxRequestBytes: number,
+): Promise<UploadedImage | Response> {
+  let form: FormData;
+  const parsed = await parseBoundedMultipartForm(request, maxRequestBytes);
+  if (parsed instanceof Response) return parsed;
+  form = parsed;
 
   if (form.get("mode") !== "real-ocr") {
     return json(400, { error: "Invalid extraction mode." });
@@ -64,7 +112,10 @@ async function readMultipartImage(request: Request, maxImageBytes: number): Prom
   if (!(image instanceof Blob)) {
     return json(400, { error: "Missing image upload." });
   }
-  if (image.size <= 0 || image.size > maxImageBytes) {
+  if (image.size <= 0) {
+    return json(400, { error: "Invalid image upload." });
+  }
+  if (image.size > maxImageBytes) {
     return json(413, { error: "Image is too large." });
   }
 
@@ -92,7 +143,8 @@ export async function handleExtractRequest(
   }
 
   const maxImageBytes = options.maxImageBytes ?? DEFAULT_MAX_IMAGE_BYTES;
-  const uploadedImage = await readMultipartImage(request, maxImageBytes);
+  const maxRequestBytes = options.maxRequestBytes ?? DEFAULT_MAX_REQUEST_BYTES;
+  const uploadedImage = await readMultipartImage(request, maxImageBytes, maxRequestBytes);
   if (uploadedImage instanceof Response) return uploadedImage;
 
   const result = await extractMoneyGuardTotals(uploadedImage.bytes, {

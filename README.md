@@ -152,9 +152,11 @@ Runtime contract:
 | `MONEY_GUARD_DEBUG` | Must be `false` or unset in hosted rehearsal/production; debug output is not needed for private OCR smoke checks. |
 | `MONEY_GUARD_VISION_MODEL` | Optional OCR model override; defaults to `gemini-2.5-flash`. |
 | `NODE_VERSION` | Use Node 22 on hosts that require an explicit runtime version. |
-| `finance.json` | Required at process root for hosted totals math; provide it as a host secret file, not a committed file. |
+| `finance.json` | Required at process root for hosted totals math; provide it as a host secret file, not a committed file. Unknown string `context.marketCondition` values are normalized to `neutral` with the fixed diagnostic `market_condition_normalized`. |
 
-`POST /extract` accepts `multipart/form-data` with `mode=real-ocr` and an `image` file. Accepted image MIME types are `image/png`, `image/jpeg`, and `image/webp`. The endpoint verifies that the declared MIME type matches the image signature before it calls the vision provider, and it passes the validated MIME type to Gemini. Mismatched or unsupported image types return `415`.
+`POST /extract` accepts `multipart/form-data` with `mode=real-ocr` and an `image` file. Authentication is checked before the request body is read. The image cap is 5 MiB, and the total HTTP request cap is 5 MiB + 256 KiB to allow multipart overhead; requests over the total cap return `413` before multipart parsing.
+
+Accepted image MIME types are `image/png`, `image/jpeg`, and `image/webp`; `image/jpg` is normalized to canonical `image/jpeg`. The endpoint verifies that the declared MIME type matches a bounded container-structure check before it calls the vision provider, and it passes the validated canonical MIME type to Gemini. The checks validate PNG chunk structure with `IEND`, JPEG segment structure with `EOI`, and RIFF/WebP size/chunk structure; they are not complete image decoding. Mismatched, malformed, or unsupported image types return `415`.
 
 Successful responses are totals-only:
 
