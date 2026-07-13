@@ -1,15 +1,20 @@
 import crypto from "crypto";
 import type { MoneyGuardConfig } from "../config.js";
 import { extractMoneyGuardTotals } from "../extract.js";
+import {
+  resolveUploadedImageMimeType,
+  type SupportedImageMimeType,
+  type UploadedImage,
+} from "../image.js";
 import type { VisionProvider } from "../providers/types.js";
 
 export const DEFAULT_MAX_IMAGE_BYTES = 5 * 1024 * 1024;
-
-const SUPPORTED_IMAGE_TYPES = ["image/png", "image/jpeg", "image/webp"] as const;
+export const DEFAULT_MAX_REQUEST_BYTES = DEFAULT_MAX_IMAGE_BYTES + 256 * 1024;
 
 export interface ExtractEndpointOptions {
   credential?: string;
   maxImageBytes?: number;
+  maxRequestBytes?: number;
   config?: MoneyGuardConfig;
   vision?: VisionProvider;
 }
@@ -35,46 +40,69 @@ function isAuthorized(header: string | null, credential: string): boolean {
   return safeEqual(header.slice(prefix.length), credential);
 }
 
-function isSupportedImage(bytes: Buffer, declaredType: string): boolean {
-  const hasPngSignature =
-    bytes.length >= 8 &&
-    bytes[0] === 0x89 &&
-    bytes[1] === 0x50 &&
-    bytes[2] === 0x4e &&
-    bytes[3] === 0x47 &&
-    bytes[4] === 0x0d &&
-    bytes[5] === 0x0a &&
-    bytes[6] === 0x1a &&
-    bytes[7] === 0x0a;
-  const hasJpegSignature =
-    bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
-  const hasWebpSignature =
-    bytes.length >= 12 &&
-    bytes.subarray(0, 4).toString("ascii") === "RIFF" &&
-    bytes.subarray(8, 12).toString("ascii") === "WEBP";
+async function readBoundedRequestBody(request: Request, maxRequestBytes: number): Promise<Buffer | Response> {
+  const contentLength = request.headers.get("content-length");
+  if (contentLength !== null) {
+    const declaredLength = Number(contentLength);
+    if (Number.isFinite(declaredLength) && declaredLength > maxRequestBytes) {
+      return json(413, { error: "Request is too large." });
+    }
+  }
 
-  const declaredSupported =
-    declaredType === "" || SUPPORTED_IMAGE_TYPES.includes(declaredType as (typeof SUPPORTED_IMAGE_TYPES)[number]);
-  return declaredSupported && (hasPngSignature || hasJpegSignature || hasWebpSignature);
+  if (!request.body) return Buffer.alloc(0);
+
+  const chunks: Buffer[] = [];
+  let totalBytes = 0;
+  const reader = request.body.getReader();
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      totalBytes += value.byteLength;
+      if (totalBytes > maxRequestBytes) {
+        await reader.cancel().catch(() => {});
+        return json(413, { error: "Request is too large." });
+      }
+      chunks.push(Buffer.from(value));
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  return Buffer.concat(chunks, totalBytes);
 }
 
-async function readMultipartImage(request: Request, maxImageBytes: number): Promise<Buffer | Response> {
+async function parseBoundedMultipartForm(request: Request, maxRequestBytes: number): Promise<FormData | Response> {
   const contentType = request.headers.get("content-type") ?? "";
   if (!contentType.toLowerCase().startsWith("multipart/form-data")) {
     return json(400, { error: "Expected multipart/form-data." });
   }
 
-  const contentLength = request.headers.get("content-length");
-  if (contentLength !== null && Number(contentLength) > maxImageBytes + 64 * 1024) {
-    return json(413, { error: "Image is too large." });
-  }
+  const body = await readBoundedRequestBody(request, maxRequestBytes);
+  if (body instanceof Response) return body;
 
-  let form: FormData;
+  const boundedRequest = new Request(request.url, {
+    method: request.method,
+    headers: request.headers,
+    body,
+  });
+
   try {
-    form = await request.formData();
+    return await boundedRequest.formData();
   } catch {
     return json(400, { error: "Invalid multipart payload." });
   }
+}
+
+async function readMultipartImage(
+  request: Request,
+  maxImageBytes: number,
+  maxRequestBytes: number,
+): Promise<UploadedImage | Response> {
+  let form: FormData;
+  const parsed = await parseBoundedMultipartForm(request, maxRequestBytes);
+  if (parsed instanceof Response) return parsed;
+  form = parsed;
 
   if (form.get("mode") !== "real-ocr") {
     return json(400, { error: "Invalid extraction mode." });
@@ -84,16 +112,20 @@ async function readMultipartImage(request: Request, maxImageBytes: number): Prom
   if (!(image instanceof Blob)) {
     return json(400, { error: "Missing image upload." });
   }
-  if (image.size <= 0 || image.size > maxImageBytes) {
+  if (image.size <= 0) {
+    return json(400, { error: "Invalid image upload." });
+  }
+  if (image.size > maxImageBytes) {
     return json(413, { error: "Image is too large." });
   }
 
   const bytes = Buffer.from(await image.arrayBuffer());
-  if (!isSupportedImage(bytes, image.type)) {
+  const mimeType: SupportedImageMimeType | undefined = resolveUploadedImageMimeType(bytes, image.type);
+  if (!mimeType) {
     return json(415, { error: "Unsupported image type." });
   }
 
-  return bytes;
+  return { bytes, mimeType };
 }
 
 export async function handleExtractRequest(
@@ -111,11 +143,13 @@ export async function handleExtractRequest(
   }
 
   const maxImageBytes = options.maxImageBytes ?? DEFAULT_MAX_IMAGE_BYTES;
-  const image = await readMultipartImage(request, maxImageBytes);
-  if (image instanceof Response) return image;
+  const maxRequestBytes = options.maxRequestBytes ?? DEFAULT_MAX_REQUEST_BYTES;
+  const uploadedImage = await readMultipartImage(request, maxImageBytes, maxRequestBytes);
+  if (uploadedImage instanceof Response) return uploadedImage;
 
-  const result = await extractMoneyGuardTotals(image, {
+  const result = await extractMoneyGuardTotals(uploadedImage.bytes, {
     config: options.config,
+    mimeType: uploadedImage.mimeType,
     vision: options.vision,
   });
 

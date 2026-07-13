@@ -14,6 +14,8 @@ import {
   VISION_RETRY_POLICY,
   withRetry,
 } from "./resilience.js";
+import { DEFAULT_IMAGE_MIME_TYPE, detectImageMimeType, type SupportedImageMimeType } from "./image.js";
+import { logSafeError, providerFailureCategory, summarizeConfigError } from "./safe-log.js";
 import { type Finance, FinanceSchema, VisionResultSchema } from "./schemas.js";
 
 export interface PipelineCallbacks {
@@ -26,6 +28,8 @@ export interface PipelineOptions extends PipelineCallbacks {
   providers?: MoneyGuardProviders;
   /** Override for testing/embedding. Defaults to env-derived config. */
   config?: MoneyGuardConfig;
+  /** MIME type for the supplied image. Defaults to image signature detection. */
+  imageMimeType?: SupportedImageMimeType;
 }
 
 export type PipelineResult =
@@ -40,11 +44,11 @@ export type PipelineResult =
  */
 export async function runMoneyGuardPipeline(
   imageBuffer: Buffer,
-  { onReportUpdate, providers, config }: PipelineOptions,
+  { onReportUpdate, providers, config, imageMimeType }: PipelineOptions,
 ): Promise<PipelineResult> {
   const cfg = config ?? loadConfig();
   const { vision, audit } = providers ?? selectProviders(cfg);
-  const { visionModel, textModel, financePath } = cfg;
+  const { visionModel, financePath } = cfg;
   const isDebug = (): boolean => cfg.debug;
 
   // Step 1: parallel I/O — OCR (with retry) and the local finance ledger are independent.
@@ -52,27 +56,36 @@ export async function runMoneyGuardPipeline(
   let finance: Finance;
   try {
     [rawOcr, finance] = await Promise.all([
-      withRetry(() => vision.vision(imageBuffer, VISION_PROMPT, visionModel), VISION_RETRY_POLICY),
+      withRetry(
+        () =>
+          vision.vision(
+            imageBuffer,
+            VISION_PROMPT,
+            visionModel,
+            imageMimeType ?? detectImageMimeType(imageBuffer) ?? DEFAULT_IMAGE_MIME_TYPE,
+          ),
+        VISION_RETRY_POLICY,
+      ),
       fs.promises.readFile(financePath, "utf-8").then((s) => FinanceSchema.parse(JSON.parse(s))),
     ]);
   } catch (err) {
     // Local config errors (bad JSON / failed schema) are distinct from vision/network errors.
     if (err instanceof ZodError || err instanceof SyntaxError) {
-      console.error("[moneyGuard] finance.json invalid:", err);
+      logSafeError("finance_config_invalid", summarizeConfigError(err));
       return {
         ok: false,
         kind: "config",
         message: "System Error: finance.json is missing or invalid.",
       };
     }
-    console.error("[moneyGuard] vision call failed:", err);
+    logSafeError(providerFailureCategory(err));
     return { ok: false, kind: "vision", message: toUserMessage(err) };
   }
 
   // Step 2: validate untrusted OCR output — never trust a cast.
   const parsed = VisionResultSchema.safeParse(rawOcr);
   if (!parsed.success) {
-    if (isDebug()) console.log("[moneyGuard] OCR validation failed:", parsed.error.issues);
+    if (isDebug()) logSafeError("provider_invalid_response");
     return {
       ok: false,
       kind: "vision",
@@ -85,14 +98,8 @@ export async function runMoneyGuardPipeline(
   const metrics = computeMetrics(finance, ocr.totalHours);
   const payload = buildAuditPayload(metrics, ocr, finance.context);
 
-  if (isDebug()) {
-    console.log("[moneyGuard] payload (sent to DeepSeek):", payload);
-  } else {
-    // Safe metadata only — never the sensitive metrics string.
-    console.log(
-      `[moneyGuard] ok period=${ocr.period} confidence=${ocr.confidence} tier=${metrics.tier} vision=${visionModel} text=${textModel}`,
-    );
-  }
+  // Safe metadata only — never provider payloads, OCR text, ledger values, or env values.
+  console.log(`[moneyGuard] ok confidence=${ocr.confidence} tier=${metrics.tier}`);
 
   // Step 4: stream the audit. Retry only covers connection establishment (see resilience.ts).
   try {
@@ -108,7 +115,7 @@ export async function runMoneyGuardPipeline(
     await onReportUpdate(buildReport(ocr, metrics, accumulated), true);
     return { ok: true };
   } catch (err) {
-    console.error("[moneyGuard] audit stream failed:", err);
+    logSafeError(providerFailureCategory(err));
     return { ok: false, kind: "model", message: toUserMessage(err) };
   }
 }

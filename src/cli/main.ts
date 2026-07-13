@@ -4,6 +4,7 @@ import path from "path";
 import { loadConfig } from "../config.js";
 import { runMoneyGuardPipeline } from "../pipeline.js";
 import { selectProviders } from "../providers/index.js";
+import { logSafeError } from "../safe-log.js";
 
 // Telegram rate-limit protection lives in the TRANSPORT, never the pipeline. The
 // CLI is just another transport: it throttles streamed re-renders to one per
@@ -21,7 +22,7 @@ Arguments:
 
 Options:
   --mock                Use deterministic offline providers (no API keys needed)
-  --debug               Verbose logging, including the de-identified payload
+  --debug               Safe diagnostics without payloads, headers, secrets, or env values
   -h, --help            Show this help
 
 Environment:
@@ -50,7 +51,7 @@ function resolveFinancePath(preferred: string): string {
   if (fs.existsSync(preferred)) return preferred;
   const example = path.resolve(process.cwd(), "finance.example.json");
   if (fs.existsSync(example)) {
-    console.error(`⚠️  ${path.basename(preferred)} not found — using finance.example.json`);
+    console.error("Preferred finance config not found; using example config.");
     return example;
   }
   return preferred; // let the pipeline surface the clean "config" error
@@ -75,7 +76,7 @@ async function main(): Promise<void> {
 
   const imagePath = path.resolve(process.cwd(), imageArg);
   if (!fs.existsSync(imagePath)) {
-    console.error(`Image not found: ${imagePath}`);
+    console.error("Image not found.");
     process.exitCode = 1;
     return;
   }
@@ -86,9 +87,7 @@ async function main(): Promise<void> {
   const providers = selectProviders(config);
 
   const isTty = Boolean(process.stdout.isTTY);
-  console.error(
-    `\n🔎 MoneyGuard ${mock ? "(mock)" : "(live)"} — analyzing ${path.basename(imagePath)}...\n`,
-  );
+  console.error(`\nMoneyGuard ${mock ? "(mock)" : "(live)"} — analyzing image...\n`);
 
   let lastEdit = 0;
   const render = (text: string): void => {
@@ -117,6 +116,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((err) => {
-  console.error("Fatal:", err);
+  logSafeError("fatal_unexpected_failure");
   process.exitCode = 1;
 });

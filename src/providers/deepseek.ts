@@ -9,7 +9,7 @@ export class DeepSeekAuditProvider implements AuditProvider {
 
   async *streamAudit(userPrompt: string, systemPrompt: string): AsyncGenerator<string> {
     const model = process.env.MONEY_GUARD_TEXT_MODEL ?? DEFAULT_TEXT_MODEL;
-    console.log("[deepseek] streamAudit called. Model:", model);
+    console.log("[deepseek] streamAudit called");
 
     const response = await fetch("https://api.deepseek.com/chat/completions", {
       method: "POST",

@@ -11,21 +11,25 @@ export {
   type ExtractServerOptions,
 } from "./server-core.js";
 
-function formatError(error: unknown): string {
-  if (error instanceof Error) return `${error.name}: ${error.message}`;
-  return String(error);
+function formatFatalDiagnostic(error: unknown): string {
+  if (typeof error === "object" && error !== null) {
+    const code = (error as { code?: unknown }).code;
+    if (typeof code === "string") return code;
+    if (error instanceof Error) return error.name;
+  }
+  return "unknown_failure";
 }
 
 export async function main(): Promise<http.Server> {
   const server = await startExtractServer();
   server.on("error", (error: Error) => {
-    console.error(`[moneyGuard] extract endpoint server error: ${formatError(error)}`);
+    console.error(`[moneyGuard] extract endpoint server error: ${formatFatalDiagnostic(error)}`);
     process.exit(1);
   });
   return server;
 }
 
 main().catch((error: unknown) => {
-  console.error(`[moneyGuard] extract endpoint startup failed: ${formatError(error)}`);
+  console.error(`[moneyGuard] extract endpoint startup failed: ${formatFatalDiagnostic(error)}`);
   process.exit(1);
 });

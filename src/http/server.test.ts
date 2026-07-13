@@ -51,6 +51,27 @@ describe("extract HTTP server", () => {
     expect(exit).not.toHaveBeenCalled();
   });
 
+  it("exits non-zero with a bounded diagnostic when startup fails", async () => {
+    const startExtractServerMock = vi
+      .fn()
+      .mockRejectedValue(Object.assign(new Error("raw startup failure with private value"), { code: "EADDRINUSE" }));
+    vi.doMock("./server-core.js", () => ({
+      createExtractServer: vi.fn(),
+      listenExtractServer: vi.fn(),
+      resolveExtractListenOptions: vi.fn(),
+      startExtractServer: startExtractServerMock,
+    }));
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    const exit = vi.spyOn(process, "exit").mockImplementation((() => undefined) as never);
+
+    await import("./server.js");
+    await vi.waitFor(() => expect(exit).toHaveBeenCalledWith(1));
+
+    const logged = consoleError.mock.calls.flat().join(" ");
+    expect(logged).toContain("[moneyGuard] extract endpoint startup failed: EADDRINUSE");
+    expect(logged).not.toContain("raw startup failure");
+  });
+
   it("does not start a listener from the public library entry point", async () => {
     const startExtractServerMock = vi.fn();
     vi.doMock("../http/server-core.js", () => ({

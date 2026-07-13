@@ -1,11 +1,13 @@
 import fs from "fs";
 import { ZodError } from "zod";
 import { loadConfig, type MoneyGuardConfig } from "./config.js";
+import { DEFAULT_IMAGE_MIME_TYPE, detectImageMimeType, type SupportedImageMimeType } from "./image.js";
 import { computeMetrics } from "./metrics.js";
 import { VISION_PROMPT } from "./prompts.js";
 import { selectProviders } from "./providers/index.js";
 import type { VisionProvider } from "./providers/types.js";
 import { toUserMessage, VISION_RETRY_POLICY, withRetry } from "./resilience.js";
+import { logSafeError, providerFailureCategory, summarizeConfigError } from "./safe-log.js";
 import { type Finance, FinanceSchema, VisionResultSchema } from "./schemas.js";
 
 export type ExtractionFailureKind = "config" | "provider" | "invalid-ocr";
@@ -28,6 +30,8 @@ export interface TotalsExtractionOptions {
   vision?: VisionProvider;
   /** Override for testing/embedding. Defaults to env-derived config. */
   config?: MoneyGuardConfig;
+  /** Validated upload MIME type. Defaults to image signature detection. */
+  mimeType?: SupportedImageMimeType;
 }
 
 function confidenceToNumber(confidence: "high" | "low"): number {
@@ -57,25 +61,34 @@ export async function extractMoneyGuardTotals(
   let finance: Finance;
   try {
     [rawOcr, finance] = await Promise.all([
-      withRetry(() => vision.vision(imageBuffer, VISION_PROMPT, config.visionModel), VISION_RETRY_POLICY),
+      withRetry(
+        () =>
+          vision.vision(
+            imageBuffer,
+            VISION_PROMPT,
+            config.visionModel,
+            options.mimeType ?? detectImageMimeType(imageBuffer) ?? DEFAULT_IMAGE_MIME_TYPE,
+          ),
+        VISION_RETRY_POLICY,
+      ),
       loadFinance(config.financePath),
     ]);
   } catch (err) {
     if (err instanceof ZodError || err instanceof SyntaxError) {
-      console.error("[moneyGuard] finance.json invalid:", err);
+      logSafeError("finance_config_invalid", summarizeConfigError(err));
       return {
         ok: false,
         kind: "config",
         message: "System Error: finance.json is missing or invalid.",
       };
     }
-    console.error("[moneyGuard] vision call failed");
+    logSafeError(providerFailureCategory(err));
     return { ok: false, kind: "provider", message: toUserMessage(err) };
   }
 
   const parsed = VisionResultSchema.safeParse(rawOcr);
   if (!parsed.success) {
-    if (config.debug) console.log("[moneyGuard] OCR validation failed:", parsed.error.issues);
+    if (config.debug) logSafeError("provider_invalid_response");
     return {
       ok: false,
       kind: "invalid-ocr",
