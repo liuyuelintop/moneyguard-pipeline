@@ -24,6 +24,12 @@ function webpChunk(type: string, data: Buffer): Buffer {
   return Buffer.concat([Buffer.from(type, "ascii"), size, data, data.length % 2 ? Buffer.from([0]) : Buffer.alloc(0)]);
 }
 
+function webpChunkWithDeclaredSize(type: string, declaredSize: number, data: Buffer): Buffer {
+  const size = Buffer.alloc(4);
+  size.writeUInt32LE(declaredSize, 0);
+  return Buffer.concat([Buffer.from(type, "ascii"), size, data, data.length % 2 ? Buffer.from([0]) : Buffer.alloc(0)]);
+}
+
 function webpFile(...chunks: Buffer[]): Buffer {
   const payload = Buffer.concat([Buffer.from("WEBP", "ascii"), ...chunks]);
   const riffSize = Buffer.alloc(4);
@@ -300,8 +306,21 @@ describe("POST /extract", () => {
       415,
       { error: "Unsupported image type." },
     ],
-    ["malformed WebP structure", webpFile(webpChunk("JUNK", Buffer.from([0]))), "image/webp", 415, { error: "Unsupported image type." }],
+    [
+      "unknown WebP chunk",
+      webpFile(webpChunk("JUNK", Buffer.from([0])), webpChunk("VP8L", VP8L_BYTES)),
+      "image/webp",
+      415,
+      { error: "Unsupported image type." },
+    ],
     ["VP8X-only WebP", webpFile(webpChunk("VP8X", Buffer.alloc(10))), "image/webp", 415, { error: "Unsupported image type." }],
+    [
+      "oversized WebP chunk declaration",
+      webpFile(webpChunkWithDeclaredSize("VP8L", VP8L_BYTES.length + 4, VP8L_BYTES)),
+      "image/webp",
+      415,
+      { error: "Unsupported image type." },
+    ],
     ["truncated multi-chunk WebP", EXTENDED_WEBP_BYTES.subarray(0, EXTENDED_WEBP_BYTES.length - 1), "image/webp", 415, { error: "Unsupported image type." }],
   ])("rejects %s before finance/provider work", async (_label, bytes, mimeType, status, body) => {
     const vision = new StubVision({ totalHours: 40, period: "2026-W27", confidence: "high" });
@@ -361,7 +380,7 @@ describe("POST /extract", () => {
     expect(vision.calls).toHaveLength(0);
   });
 
-  it("passes the validated PNG MIME type to the vision provider", async () => {
+  it("passes the validated PNG MIME type for a PNG containing an IDAT chunk", async () => {
     const vision = new StubVision({ totalHours: 40, period: "2026-W27", confidence: "high" });
 
     const response = await handleExtractRequest(makeRequest(makeForm()), {
@@ -402,7 +421,7 @@ describe("POST /extract", () => {
     expect(vision.calls).toEqual([{ mimeType: "image/jpeg" }]);
   });
 
-  it("passes the validated WebP MIME type to the vision provider", async () => {
+  it("passes the validated WebP MIME type for a single-chunk WebP", async () => {
     const vision = new StubVision({ totalHours: 40, period: "2026-W27", confidence: "high" });
     const form = makeForm(new Blob([WEBP_BYTES], { type: "image/webp" }));
 

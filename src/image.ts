@@ -20,7 +20,7 @@ export function normalizeDeclaredImageMimeType(value: string): string {
 
 function isPng(bytes: Buffer): boolean {
   if (
-    bytes.length < 45 ||
+    bytes.length < 57 ||
     bytes[0] !== 0x89 ||
     bytes[1] !== 0x50 ||
     bytes[2] !== 0x4e ||
@@ -152,6 +152,8 @@ function scanWebpChunks(bytes: Buffer, start: number, end: number, allowVp8x: bo
         return { valid: false, hasImageData: false };
       }
       hasImageData = true;
+    } else if (!isKnownWebpMetadataChunk(chunkType)) {
+      return { valid: false, hasImageData: false };
     }
 
     offset = paddedEnd;
@@ -159,6 +161,16 @@ function scanWebpChunks(bytes: Buffer, start: number, end: number, allowVp8x: bo
   }
 
   return { valid: offset === end, hasImageData };
+}
+
+function isKnownWebpMetadataChunk(chunkType: string): boolean {
+  return (
+    chunkType === "ALPH" ||
+    chunkType === "ANIM" ||
+    chunkType === "ICCP" ||
+    chunkType === "EXIF" ||
+    chunkType === "XMP "
+  );
 }
 
 function isWebp(bytes: Buffer): boolean {
