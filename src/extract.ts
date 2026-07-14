@@ -6,7 +6,11 @@ import { computeMetrics } from "./metrics.js";
 import { VISION_PROMPT } from "./prompts.js";
 import { selectProviders } from "./providers/index.js";
 import type { VisionProvider } from "./providers/types.js";
-import { toUserMessage, VISION_RETRY_POLICY, withRetry } from "./resilience.js";
+import {
+  toUserMessage,
+  visionRetryPolicyForMaxAttempts,
+  withRetry,
+} from "./resilience.js";
 import { logSafeError, providerFailureCategory, summarizeConfigError } from "./safe-log.js";
 import { type Finance, FinanceSchema, VisionResultSchema } from "./schemas.js";
 
@@ -32,6 +36,25 @@ export interface TotalsExtractionOptions {
   config?: MoneyGuardConfig;
   /** Validated upload MIME type. Defaults to image signature detection. */
   mimeType?: SupportedImageMimeType;
+  /** Safe lifecycle callback for provider attempt observability. */
+  onProviderAttempt?: (event: ProviderAttemptEvent) => void;
+}
+
+export interface ProviderAttemptEvent {
+  ordinal: number;
+  result: "starting" | "completed" | "failed";
+  failureCategory?: string;
+}
+
+function notifyProviderAttempt(
+  callback: TotalsExtractionOptions["onProviderAttempt"],
+  event: ProviderAttemptEvent,
+): void {
+  try {
+    callback?.(event);
+  } catch {
+    logSafeError("provider_milestone_failed");
+  }
 }
 
 function confidenceToNumber(confidence: "high" | "low"): number {
@@ -55,21 +78,55 @@ export async function extractMoneyGuardTotals(
   options: TotalsExtractionOptions = {},
 ): Promise<TotalsExtractionResult> {
   const config = options.config ?? loadConfig();
+  if (!config.providerAttemptPolicy.valid) {
+    logSafeError(config.providerAttemptPolicy.failureCategory);
+    return {
+      ok: false,
+      kind: "config",
+      message: "System Error: provider attempt policy is invalid.",
+    };
+  }
   const vision = options.vision ?? selectProviders(config).vision;
 
   let rawOcr: unknown;
   let finance: Finance;
+  let providerAttempt = 0;
   try {
     [rawOcr, finance] = await Promise.all([
       withRetry(
-        () =>
-          vision.vision(
-            imageBuffer,
-            VISION_PROMPT,
-            config.visionModel,
-            options.mimeType ?? detectImageMimeType(imageBuffer) ?? DEFAULT_IMAGE_MIME_TYPE,
-          ),
-        VISION_RETRY_POLICY,
+        async () => {
+          providerAttempt += 1;
+          const ordinal = providerAttempt;
+          notifyProviderAttempt(options.onProviderAttempt, {
+            ordinal,
+            result: "starting",
+          });
+          try {
+            const result = await vision.vision(
+              imageBuffer,
+              VISION_PROMPT,
+              config.visionModel,
+              options.mimeType ??
+                detectImageMimeType(imageBuffer) ??
+                DEFAULT_IMAGE_MIME_TYPE,
+            );
+            notifyProviderAttempt(options.onProviderAttempt, {
+              ordinal,
+              result: "completed",
+            });
+            return result;
+          } catch (error) {
+            notifyProviderAttempt(options.onProviderAttempt, {
+              ordinal,
+              result: "failed",
+              failureCategory: providerFailureCategory(error),
+            });
+            throw error;
+          }
+        },
+        visionRetryPolicyForMaxAttempts(
+          config.providerAttemptPolicy.maxAttempts,
+        ),
       ),
       loadFinance(config.financePath),
     ]);

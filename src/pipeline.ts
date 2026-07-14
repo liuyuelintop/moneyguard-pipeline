@@ -11,7 +11,7 @@ import {
   AUDIT_CONNECT_RETRY_POLICY,
   streamWithConnectRetry,
   toUserMessage,
-  VISION_RETRY_POLICY,
+  visionRetryPolicyForMaxAttempts,
   withRetry,
 } from "./resilience.js";
 import { DEFAULT_IMAGE_MIME_TYPE, detectImageMimeType, type SupportedImageMimeType } from "./image.js";
@@ -47,6 +47,14 @@ export async function runMoneyGuardPipeline(
   { onReportUpdate, providers, config, imageMimeType }: PipelineOptions,
 ): Promise<PipelineResult> {
   const cfg = config ?? loadConfig();
+  if (!cfg.providerAttemptPolicy.valid) {
+    logSafeError(cfg.providerAttemptPolicy.failureCategory);
+    return {
+      ok: false,
+      kind: "config",
+      message: "System Error: provider attempt policy is invalid.",
+    };
+  }
   const { vision, audit } = providers ?? selectProviders(cfg);
   const { visionModel, financePath } = cfg;
   const isDebug = (): boolean => cfg.debug;
@@ -64,7 +72,7 @@ export async function runMoneyGuardPipeline(
             visionModel,
             imageMimeType ?? detectImageMimeType(imageBuffer) ?? DEFAULT_IMAGE_MIME_TYPE,
           ),
-        VISION_RETRY_POLICY,
+        visionRetryPolicyForMaxAttempts(cfg.providerAttemptPolicy.maxAttempts),
       ),
       fs.promises.readFile(financePath, "utf-8").then((s) => FinanceSchema.parse(JSON.parse(s))),
     ]);

@@ -1,4 +1,5 @@
 import { ZodError } from "zod";
+import type { ProviderMaxAttempts } from "./config.js";
 
 // Local retry/backoff + transient-error detection + user-facing error mapping.
 // Self-contained: no framework or network-client coupling, so it ports cleanly
@@ -112,6 +113,15 @@ export const VISION_RETRY_POLICY: RetryPolicy = {
   baseDelayMs: 800,
   backoff: "exponential",
 };
+
+export function visionRetryPolicyForMaxAttempts(
+  providerMaxAttempts: ProviderMaxAttempts,
+): RetryPolicy {
+  return {
+    ...VISION_RETRY_POLICY,
+    maxRetries: providerMaxAttempts - 1,
+  };
+}
 
 export const AUDIT_CONNECT_RETRY_POLICY: RetryPolicy = {
   maxRetries: 2,
