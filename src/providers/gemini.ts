@@ -46,7 +46,7 @@ export class GeminiVisionProvider implements VisionProvider {
     mimeType: SupportedImageMimeType = DEFAULT_IMAGE_MIME_TYPE,
   ): Promise<unknown> {
     if (process.env.MONEY_GUARD_DEBUG === "true") {
-      console.log("gemini.vision called. MIME:", mimeType);
+      console.log("[moneyGuard] gemini_vision_started");
     }
 
     const response = await this.client.models.generateContent({

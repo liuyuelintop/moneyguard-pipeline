@@ -1,13 +1,15 @@
 import fs from "fs";
 import os from "os";
 import path from "path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { loadConfig, type MoneyGuardConfig } from "../config.js";
-import { handleExtractRequest } from "./extract.js";
 import type { VisionProvider } from "../providers/types.js";
 import type { SupportedImageMimeType } from "../image.js";
+import { TIMECARD_CORRELATION_HEADER } from "./correlation.js";
+import { handleExtractRequest } from "./extract.js";
 
 const CREDENTIAL = "test-private-token";
+const CORRELATION_ID = "123e4567-e89b-42d3-a456-426614174000";
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 const JPEG_SIGNATURE = Buffer.from([0xff, 0xd8, 0xff]);
 const BOUNDARY = "moneyguard-boundary";
@@ -85,14 +87,30 @@ function writeFinance(obj: unknown): string {
   return file;
 }
 
-function makeConfig(financePath = writeFinance(FINANCE)): MoneyGuardConfig {
-  return { ...loadConfig(), financePath, mock: false, debug: false };
+function makeConfig(
+  financePath = writeFinance(FINANCE),
+  providerMaxAttempts = 1,
+): MoneyGuardConfig {
+  return {
+    ...loadConfig(),
+    financePath,
+    mock: false,
+    debug: false,
+    providerAttemptPolicy: {
+      valid: true,
+      strict: providerMaxAttempts === 1,
+      maxAttempts: providerMaxAttempts as 1 | 2 | 3,
+    },
+  };
 }
 
 function makeRequest(form: FormData, token = CREDENTIAL): Request {
   return new Request("http://127.0.0.1/extract", {
     method: "POST",
-    headers: { Authorization: `Bearer ${token}` },
+    headers: {
+      Authorization: `Bearer ${token}`,
+      [TIMECARD_CORRELATION_HEADER]: CORRELATION_ID,
+    },
     body: form,
   });
 }
@@ -136,6 +154,7 @@ function makeRawRequest(body: Buffer | ReadableStream<Uint8Array>, headers: Reco
     headers: {
       Authorization: `Bearer ${CREDENTIAL}`,
       "Content-Type": `multipart/form-data; boundary=${BOUNDARY}`,
+      [TIMECARD_CORRELATION_HEADER]: CORRELATION_ID,
       ...headers,
     },
     body,
@@ -154,12 +173,50 @@ async function parse(response: Response): Promise<Record<string, unknown>> {
   return (await response.json()) as Record<string, unknown>;
 }
 
+beforeEach(() => {
+  vi.spyOn(console, "info").mockImplementation(() => {});
+});
+
 afterEach(() => {
   for (const file of tmpFiles.splice(0)) fs.rmSync(file, { force: true });
   vi.restoreAllMocks();
 });
 
 describe("POST /extract", () => {
+  it("logs request receipt before correlation and authorization without reproducing invalid input", async () => {
+    const invalidCorrelation = "private-invalid-correlation-value";
+    const request = new Request("http://127.0.0.1/extract", {
+      method: "POST",
+      headers: {
+        [TIMECARD_CORRELATION_HEADER]: invalidCorrelation,
+      },
+      body: makeForm(),
+    });
+
+    const response = await handleExtractRequest(request, {
+      credential: CREDENTIAL,
+      config: makeConfig("/finance-should-not-be-read.json"),
+      vision: new StubVision({
+        totalHours: 40,
+        period: "2026-W27",
+        confidence: "high",
+      }),
+    });
+    const events = vi.mocked(console.info).mock.calls.map(([event]) =>
+      event as Record<string, unknown>,
+    );
+
+    expect(response.status).toBe(401);
+    expect(events.map((event) => [event.stage, event.result])).toEqual([
+      ["request", "received"],
+      ["correlation_validation", "invalid"],
+      ["authorization", "rejected"],
+      ["final_response", "completed"],
+    ]);
+    expect(JSON.stringify(events)).not.toContain(invalidCorrelation);
+    expect(events.every((event) => event.correlationId === undefined)).toBe(true);
+  });
+
   it("rejects missing bearer auth before calling the provider", async () => {
     const formData = vi.spyOn(Request.prototype, "formData");
     const vision = new StubVision({ totalHours: 40, period: "2026-W27", confidence: "high" });
@@ -178,6 +235,149 @@ describe("POST /extract", () => {
     expect(await parse(response)).toEqual({ error: "Unauthorized." });
     expect(vision.calls).toHaveLength(0);
     expect(formData).not.toHaveBeenCalled();
+  });
+
+  it.each([undefined, "", "invalid", "1.5", "0", "-1", "2", "3", "4"])(
+    "fails closed before body/provider work for strict cap %j",
+    async (cap) => {
+      const env: NodeJS.ProcessEnv = {
+        MONEYGUARD_REQUIRE_SINGLE_PROVIDER_ATTEMPT: "true",
+      };
+      if (cap !== undefined) env.MONEYGUARD_PROVIDER_MAX_ATTEMPTS = cap;
+      const config = {
+        ...loadConfig(env),
+        financePath: "/finance-should-not-be-read.json",
+      };
+      const vision = new StubVision({
+        totalHours: 40,
+        period: "2026-W27",
+        confidence: "high",
+      });
+      const form = makeForm();
+
+      const response = await handleExtractRequest(makeRequest(form), {
+        credential: CREDENTIAL,
+        config,
+        vision,
+      });
+      const events = vi.mocked(console.info).mock.calls.map(([event]) =>
+        event as Record<string, unknown>,
+      );
+
+      expect(response.status).toBe(500);
+      expect(response.headers.get("Cache-Control")).toBe("no-store");
+      expect(vision.calls).toHaveLength(0);
+      expect(events).toContainEqual(
+        expect.objectContaining({
+          stage: "configuration",
+          result: "protected_rehearsal_attempt_policy_invalid",
+        }),
+      );
+      expect(events.some((event) => event.stage === "provider_invocation")).toBe(false);
+      expect(events.some((event) => event.stage === "body_read")).toBe(false);
+    },
+  );
+
+  it.each([
+    [
+      "query parameters",
+      "http://127.0.0.1/extract?attemptLimit=1&strictMode=false",
+      {},
+      "query-policy-marker",
+    ],
+    [
+      "arbitrary request headers",
+      "http://127.0.0.1/extract",
+      {
+        "X-Test-Attempt-Limit": "1",
+        "X-Test-Strict-Mode": "false",
+      },
+      "header-policy-marker",
+    ],
+    [
+      "filename and multipart metadata",
+      "http://127.0.0.1/extract",
+      {},
+      "multipart-policy-marker",
+    ],
+  ])(
+    "does not let %s override an invalid strict cap",
+    async (_name, url, extraHeaders, privateMarker) => {
+      const config = {
+        ...loadConfig({
+          MONEYGUARD_REQUIRE_SINGLE_PROVIDER_ATTEMPT: "true",
+          MONEYGUARD_PROVIDER_MAX_ATTEMPTS: "4",
+        }),
+        financePath: "/finance-should-not-be-read.json",
+      };
+      const vision = new StubVision({
+        totalHours: 40,
+        period: "2026-W27",
+        confidence: "high",
+      });
+      const transport = vi
+        .spyOn(globalThis, "fetch")
+        .mockRejectedValue(new Error("unexpected transport"));
+      const form = new FormData();
+      form.set("mode", "real-ocr");
+      form.set(
+        "image",
+        new Blob([PNG_BYTES], {
+          type:
+            _name === "filename and multipart metadata"
+              ? `image/png; note=${privateMarker}`
+              : "image/png",
+        }),
+        `${privateMarker}.png`,
+      );
+      const request = new Request(url, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${CREDENTIAL}`,
+          [TIMECARD_CORRELATION_HEADER]: CORRELATION_ID,
+          ...extraHeaders,
+        },
+        body: form,
+      });
+
+      const response = await handleExtractRequest(request, {
+        credential: CREDENTIAL,
+        config,
+        vision,
+      });
+      const events = vi.mocked(console.info).mock.calls.map(([event]) =>
+        event as Record<string, unknown>,
+      );
+
+      expect(config.providerAttemptPolicy).toMatchObject({ valid: false });
+      expect(response.status).toBe(500);
+      expect(response.headers.get("Cache-Control")).toBe("no-store");
+      expect(vision.calls).toHaveLength(0);
+      expect(transport).not.toHaveBeenCalled();
+      expect(events.some((event) => event.stage === "body_read")).toBe(false);
+      expect(events.some((event) => event.stage === "provider_invocation")).toBe(false);
+      expect(JSON.stringify(events)).not.toContain(privateMarker);
+    },
+  );
+
+  it("retains the non-strict default of three total provider attempts", async () => {
+    const config = {
+      ...loadConfig({}),
+      financePath: writeFinance(FINANCE),
+    };
+    const vision = new StubVision(
+      null,
+      Object.assign(new Error("private transient detail"), { status: 503 }),
+    );
+
+    const response = await handleExtractRequest(makeRequest(makeForm()), {
+      credential: CREDENTIAL,
+      config,
+      vision,
+    });
+
+    expect(response.status).toBe(502);
+    expect(vision.calls).toHaveLength(3);
   });
 
   it("rejects excessive declared Content-Length before parsing or loading finance", async () => {
@@ -427,6 +627,105 @@ describe("POST /extract", () => {
     expect(body).toEqual({ error: "OCR provider failed." });
     expect(JSON.stringify(body)).not.toContain("raw OCR text");
     expect(consoleError).toHaveBeenCalledWith("[moneyGuard] provider_unknown_failure");
+  });
+
+  it.each([429, 503])(
+    "makes exactly one provider call in server-controlled single-attempt mode after %s",
+    async (status) => {
+      const privateFailureMarker = `private-provider-${status}-payload`;
+      const failure = Object.assign(new Error(privateFailureMarker), { status });
+      const vision = new StubVision(null, failure);
+      const form = makeForm();
+      form.set("providerMaxAttempts", "3");
+      const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      const response = await handleExtractRequest(makeRequest(form), {
+        credential: CREDENTIAL,
+        config: makeConfig(undefined, 1),
+        vision,
+      });
+      const events = vi.mocked(console.info).mock.calls.map(([event]) =>
+        event as Record<string, unknown>,
+      );
+      const providerEvents = events.filter(
+        (event) => event.stage === "provider_invocation",
+      );
+      const serializedLogs = JSON.stringify({
+        milestones: events,
+        errors: consoleError.mock.calls,
+      });
+
+      expect(response.status).toBe(502);
+      expect(response.headers.get("Cache-Control")).toBe("no-store");
+      expect(vision.calls).toHaveLength(1);
+      expect(providerEvents).toEqual([
+        expect.objectContaining({
+          result: "starting",
+          providerAttempt: 1,
+        }),
+        expect.objectContaining({
+          result:
+            status === 429 ? "provider_rate_limited" : "provider_unavailable",
+          providerAttempt: 1,
+        }),
+      ]);
+      expect(
+        providerEvents.some((event) => event.providerAttempt === 2),
+      ).toBe(false);
+      expect(serializedLogs).not.toContain(privateFailureMarker);
+      expect(serializedLogs).not.toContain("timecard.png");
+      expect(serializedLogs).not.toContain("providerMaxAttempts");
+    },
+  );
+
+  it("emits ordered payload-free milestones for a successful request", async () => {
+    const vision = new StubVision({
+      totalHours: 40,
+      period: "2026-W27",
+      confidence: "high",
+    });
+
+    const response = await handleExtractRequest(makeRequest(makeForm()), {
+      credential: CREDENTIAL,
+      config: makeConfig(),
+      vision,
+    });
+    const events = vi.mocked(console.info).mock.calls.map(([event]) =>
+      event as Record<string, unknown>,
+    );
+    const stages = events.map((event) => event.stage);
+    const allowedKeys = new Set([
+      "correlationId",
+      "stage",
+      "result",
+      "elapsedMs",
+      "providerAttempt",
+      "responseCategory",
+    ]);
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Cache-Control")).toBe("no-store");
+    expect(stages).toEqual([
+      "request",
+      "correlation_validation",
+      "authorization",
+      "body_read",
+      "multipart_validation",
+      "provider_invocation",
+      "provider_invocation",
+      "final_response",
+    ]);
+    expect(events[1]).toMatchObject({
+      correlationId: CORRELATION_ID,
+      result: "valid",
+    });
+    expect(events.at(-1)).toMatchObject({ responseCategory: "success" });
+    for (const event of events) {
+      expect(Object.keys(event).every((key) => allowedKeys.has(key))).toBe(true);
+    }
+    expect(JSON.stringify(events)).not.toMatch(
+      /timecard\.png|worker|employer|rawOcrText|credential|image\/png/,
+    );
   });
 
   it("logs provider rate-limit failures as a fixed safe category", async () => {

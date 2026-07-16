@@ -4,6 +4,7 @@ import {
   isTransientModelError,
   streamWithConnectRetry,
   toUserMessage,
+  visionRetryPolicyForMaxAttempts,
   withRetry,
   type RetryPolicy,
 } from "./resilience.js";
@@ -26,6 +27,11 @@ describe("isTransientModelError", () => {
 });
 
 describe("withRetry", () => {
+  it("maps the server attempt cap to the existing retry policy", () => {
+    expect(visionRetryPolicyForMaxAttempts(3)).toMatchObject({ maxRetries: 2 });
+    expect(visionRetryPolicyForMaxAttempts(1)).toMatchObject({ maxRetries: 0 });
+  });
+
   it("retries a transient error then succeeds", async () => {
     let calls = 0;
     const fn = vi.fn(async () => {

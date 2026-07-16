@@ -1,6 +1,9 @@
-export const SUPPORTED_IMAGE_MIME_TYPES = ["image/png", "image/jpeg"] as const;
+import { timecardExtractionContract, type ContractImageMimeType } from "./http/internal-contract.js";
 
-export type SupportedImageMimeType = (typeof SUPPORTED_IMAGE_MIME_TYPES)[number];
+export const SUPPORTED_IMAGE_MIME_TYPES =
+  timecardExtractionContract.acceptedMimeTypes;
+
+export type SupportedImageMimeType = ContractImageMimeType;
 
 export interface UploadedImage {
   bytes: Buffer;

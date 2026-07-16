@@ -3,7 +3,6 @@ import fs from "fs";
 import path from "path";
 import { loadConfig } from "../config.js";
 import { runMoneyGuardPipeline } from "../pipeline.js";
-import { selectProviders } from "../providers/index.js";
 import { logSafeError } from "../safe-log.js";
 
 // Telegram rate-limit protection lives in the TRANSPORT, never the pipeline. The
@@ -84,7 +83,6 @@ async function main(): Promise<void> {
 
   const config = loadConfig();
   config.financePath = resolveFinancePath(config.financePath);
-  const providers = selectProviders(config);
 
   const isTty = Boolean(process.stdout.isTTY);
   console.error(`\nMoneyGuard ${mock ? "(mock)" : "(live)"} — analyzing image...\n`);
@@ -96,7 +94,6 @@ async function main(): Promise<void> {
   };
 
   const result = await runMoneyGuardPipeline(imageBuffer, {
-    providers,
     config,
     // Throttle streamed re-renders; always apply the final one. Mirrors the
     // Telegram editMessage throttle exactly — same THROTTLE_MS contract.

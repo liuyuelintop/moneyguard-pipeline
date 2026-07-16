@@ -128,6 +128,7 @@ pnpm moneyguard path/to/real-timecard.png
 | `MONEY_GUARD_VISION_MODEL` | OCR model | `gemini-2.5-flash` |
 | `MONEY_GUARD_TEXT_MODEL` | Audit model | `deepseek-v4-flash` |
 | `MONEYGUARD_MOCK` | Force offline providers (`--mock`) | off |
+| `MONEYGUARD_PROVIDER_MAX_ATTEMPTS` | Bound vision-provider calls, including the initial attempt (`1`-`3`) | `3` |
 | `MONEY_GUARD_DEBUG` | Enable safe diagnostics without payloads, headers, secrets, or env values | off |
 
 ### Private `/extract` HTTP endpoint
@@ -147,6 +148,8 @@ Runtime contract:
 | Bind host | The HTTP server binds to `0.0.0.0` so Render can route traffic to it. |
 | `HOST` | Ignored by the executable HTTP entrypoint. Use code-level `startExtractServer({ host })` only for embedded tests/tools. |
 | `MONEYGUARD_PIPELINE_CREDENTIAL` | Required bearer credential for `POST /extract`; keep present and masked in hosting UI. |
+| `MONEYGUARD_PROVIDER_MAX_ATTEMPTS` | Server-only vision-provider attempt cap from `1` to `3`; use `1` for protected single-attempt rehearsal. Missing or invalid values fall back to `3`. |
+| `MONEYGUARD_REQUIRE_SINGLE_PROVIDER_ATTEMPT` | Server-only protected rehearsal invariant. When `true`, `MONEYGUARD_PROVIDER_MAX_ATTEMPTS` must be explicitly and exactly `1`; otherwise extraction fails before provider work. |
 | `GEMINI_API_KEY` | Required only for live OCR provider calls; keep present and masked in hosting UI. |
 | `MONEYGUARD_MOCK` | Must be `false` or unset for live OCR; set only for deterministic offline tests. |
 | `MONEY_GUARD_DEBUG` | Must be `false` or unset in hosted rehearsal/production; debug output is not needed for private OCR smoke checks. |
@@ -155,6 +158,8 @@ Runtime contract:
 | `finance.json` | Required at process root for hosted totals math; provide it as a host secret file, not a committed file. Unknown string `context.marketCondition` values are normalized to `neutral` with the fixed diagnostic `market_condition_normalized`. |
 
 `POST /extract` accepts `multipart/form-data` with `mode=real-ocr` and an `image` file. Authentication is checked before the request body is read. The image cap is 5 MiB, and the total HTTP request cap is 5 MiB + 256 KiB to allow multipart overhead; requests over the total cap return `413` before multipart parsing.
+
+The web adapter may send a UUID v4 in `X-MoneyGuard-Correlation-Id`. The endpoint validates the fixed 36-character format before logging it, treats missing or invalid values as safe categories without reproducing raw input, and never uses correlation metadata for authentication, provider selection, retry policy, or extraction logic.
 
 Accepted image MIME types are `image/png` and `image/jpeg`; `image/jpg` is normalized to canonical `image/jpeg`. `image/webp` is not accepted for the rehearsal contract. The endpoint verifies that the declared MIME type matches a bounded container-structure check before it calls the vision provider, and it passes the validated canonical MIME type to Gemini. The checks require PNG `IDAT` before `IEND` and JPEG segment structure with `EOI`; they are not complete image decoding. Mismatched, malformed, or unsupported image types return `415`.
 
